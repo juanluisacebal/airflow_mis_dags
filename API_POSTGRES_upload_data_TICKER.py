@@ -263,7 +263,6 @@ with DAG(
     default_args=default_args,
     #schedule_interval=default_args["schedule_interval"],
     schedule_interval='15 4 * * *',
-    catchup=False,
     tags=["API", "PostgreSQL", "Finance", "ETL"],
     doc_md="""
 ### DAG: Upload Ticker Historical Data to PostgreSQL
@@ -277,7 +276,7 @@ Todos los tickers son procesados secuencialmente usando tareas consolidadas.
 
     tickers = Variable.get("tickers", default_var='["SPY", "QQQ", "DIA"]', deserialize_json=True)
     tickers = [t.strip() for t in tickers if t.strip().isalnum()]
-    ticker_dataset = Dataset("postgres://finance.tickers_historicos")
+    ticker_dataset = Dataset("postgres://postgres:airflow@localhost:5432/airflow/finance/tickers_historicos")
 
     extract_all = PythonOperator(
         task_id="extract_all_tickers",

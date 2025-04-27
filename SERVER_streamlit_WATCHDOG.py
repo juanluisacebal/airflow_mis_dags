@@ -29,14 +29,11 @@ def start_streamlit_if_needed_factory(app_file, app_path, port, log_path):
             with open(log_path, "a") as f:
                 f.write(f"✅ Streamlit {app_file} ya está corriendo en el puerto {port}\n")
             return
-        conn = BaseHook.get_connection("mssql")
-        conn_str = conn.get_uri()
-        logging.info(f"🔐 MSSQL_CONN_STR: {conn_str}")
         subprocess.Popen([
             "/opt/streamlit_venv/bin/streamlit", "run", app_path,
             "--server.port", str(port),
             "--server.headless", "true"
-        ], env={**os.environ, "MSSQL_CONN_STR": conn_str}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         with open(log_path, "a") as f:
             f.write(f"🚀 Streamlit {app_file} se lanzó automáticamente en el puerto {port}\n")
     return start_streamlit_if_needed
@@ -57,7 +54,6 @@ with DAG(
     schedule_interval=default_args["schedule_interval"],
     #schedule_interval="@hourly",
     start_date=datetime(2024, 1, 1),
-    catchup=False,
     tags=["monitoring", "streamlit"],
     doc_md="""
 ### DAG: SERVER_streamlit_WATCHDOG

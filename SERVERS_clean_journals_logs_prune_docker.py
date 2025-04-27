@@ -19,7 +19,6 @@ with DAG(
     description='Clean journal logs locally and remotely',
     #schedule_interval='@weekly',
     start_date=datetime(2024, 1, 1),
-    catchup=False,
     tags=['maintenance', 'logs'],
 ) as dag:
 
@@ -55,6 +54,6 @@ with DAG(
         ''',
     )
 
-    LOCAL_log_journal_size >> LOCAL_clean_journal
+    LOCAL_log_journal_size >> LOCAL_clean_journal >> LOCAL_docker_prune_and_log_freed_space
     REMOTE_S1_log_journal_size >> REMOTE_S1_clean_journal
-    [LOCAL_clean_journal, REMOTE_S1_clean_journal] >> LOCAL_docker_prune_and_log_freed_space
+    [LOCAL_docker_prune_and_log_freed_space, REMOTE_S1_clean_journal] 

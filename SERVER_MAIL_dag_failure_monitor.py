@@ -16,7 +16,7 @@ from airflow.utils.session import provide_session
 from airflow.models import DagRun, DagModel, Variable
 from airflow.utils import timezone
 import pendulum
-from airflow.plugins.email_con_delay import EmailOperatorConDelay
+#from airflow.plugins.email_con_delay import EmailOperatorConDelay
 
 
 default_args = Variable.get("default_args", deserialize_json=True)
@@ -25,7 +25,7 @@ default_args["retry_delay"] = timedelta(minutes=default_args.pop("retry_delay_mi
 
 
 
-class EmailOperatorWithLog(EmailOperatorConDelay):
+class EmailOperatorWithLog(EmailOperator):
     """
     Custom EmailOperator that logs recipient, subject, and content details before sending.
     """
@@ -321,9 +321,7 @@ html_content = html_content.replace("DAYS_LONG", str(DAYS_LONG))
 with DAG(
     dag_id='SERVER_MAIL_dag_failure_monitor',
     default_args=default_args,
-    schedule_interval=default_args["schedule_interval"],
-    #schedule_interval='@daily',
-    catchup=False
+    schedule_interval=default_args["schedule_interval"]
 ) as dag:
 
     t_initialize_vars = PythonOperator(

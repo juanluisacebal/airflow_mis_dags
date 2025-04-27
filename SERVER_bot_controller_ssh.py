@@ -97,7 +97,7 @@ def should_run(session=None, **context):
     dag_runs = (
         session.query(DagRun)
         .filter(
-            DagRun.dag_id == "SERVER_bot_controller_ssh",
+            DagRun.dag_id == "SERVER_bot_controller",
             DagRun.execution_date > threshold_time,
         )
         .all()
@@ -134,7 +134,6 @@ def should_run(session=None, **context):
 
     logger.info("✅ No recent active executions. Proceeding with DAG run.")
     return True
-
 
 
 
@@ -204,7 +203,6 @@ with DAG(
 
     #schedule_interval="30 * * * *",
     #schedule_interval="@hourly",
-    catchup=False,
     tags=["bot", "docker"],
     doc_md="""
     ## 📄 DAG Documentation: SERVER_bot_controller_ssh

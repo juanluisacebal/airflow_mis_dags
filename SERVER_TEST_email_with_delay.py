@@ -1,7 +1,8 @@
 from airflow import DAG
 from datetime import datetime, timedelta
 from airflow.models import Variable
-from airflow.plugins.email_con_delay import EmailOperatorConDelay
+#from airflow.plugins.email_con_delay import EmailOperatorConDelay
+from airflow.operators.email_operator import EmailOperator
 
 default_args = Variable.get("default_args", deserialize_json=True)
 default_args["start_date"] = datetime.strptime(default_args["start_date"], "%Y-%m-%d")
@@ -16,11 +17,11 @@ with DAG("SERVER_TEST_email_with_delay",
         schedule_interval='15 6 * * *',
 
         #schedule_interval="0 7 * * 1-5",
-        catchup=False) as dag:
-    EmailOperatorConDelay(
+        ) as dag:
+    EmailOperator(
         task_id="task_SERVER_TEST_email_with_delay",
         to=["airflow@juanluisacebal.com"],
         subject="Test with Delay",
         html_content="<p>Does this one arrive?</p>",
-        conn_id="smtp"
+        conn_id="smtp_default"
     )

@@ -292,11 +292,10 @@ def send_email(body, html_content=False):
 
 with DAG(
     dag_id="SERVER_free_space",
-    start_date=days_ago(1),
+    start_date=days_ago(2900),
     default_args=default_args,
     schedule_interval=default_args["schedule_interval"],
     #schedule_interval="0 6 */2 * *",  # Every 2 days at 6am
-    catchup=False,
     tags=["monitoring"],
     doc_md="""
     ### 📊 SERVER_free_space DAG Documentation
@@ -375,5 +374,5 @@ with DAG(
         python_callable=should_run,
     )
 
-    check_min_free_space_task >> generate_report_task
-    generate_report_task >> check_if_should_run >> compute_changes_task >> build_html_table_task >> email_report_task
+    check_min_free_space_task >> check_if_should_run >> generate_report_task
+    generate_report_task >> compute_changes_task >> build_html_table_task >> email_report_task

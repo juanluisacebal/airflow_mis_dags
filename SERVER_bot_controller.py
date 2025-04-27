@@ -26,6 +26,7 @@ import subprocess
 import os
 from datetime import datetime, timedelta
 from airflow.utils.timezone import utcnow
+import time
 
 default_args = Variable.get("default_args", deserialize_json=True)
 default_args["start_date"] = datetime.strptime(default_args["start_date"], "%Y-%m-%d")
@@ -159,6 +160,7 @@ def run_bot():
     Runs the bot script (main.py) inside the running Docker container 'l-bot'.
     Executes main.py within the shared volume path.
     """
+    time.sleep(5)  # Wait for the container to be fully up and running
     from airflow.utils.log.logging_mixin import LoggingMixin
     logger = LoggingMixin().log
 
@@ -205,6 +207,10 @@ def schedule_reboot():
     logger.info(f"[reboot command] STDOUT:\n{result.stdout}")
     logger.info(f"[reboot command] STDERR:\n{result.stderr}")
 
+def nada():
+    print("Nada")
+
+
 with DAG(
     dag_id="SERVER_bot_controller",
     default_args=default_args,
@@ -212,7 +218,6 @@ with DAG(
 
     #schedule_interval="30 * * * *",
     #schedule_interval="@hourly",
-    catchup=False,
     tags=["bot", "docker"],
     doc_md="""
     ## 📄 DAG Documentation: SERVER_bot_controller
@@ -277,7 +282,7 @@ with DAG(
         python_callable=schedule_reboot,
     )
 '''
-
+#docker_build_image >> docker_up >> run_bot_task >> docker_down >> check_if_should_run 
 check_if_should_run >> docker_build_image >> docker_up >> run_bot_task >> docker_down 
 #>> schedule_reboot_task
 
