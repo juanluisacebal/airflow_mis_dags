@@ -56,9 +56,19 @@ def backup_git_repos(**kwargs):
                 print(f"❌ STDERR:\n{e.stderr}")
 
         result = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, cwd=repo_path)
-        if result.stdout.strip() == "":
-            print(f"✅ No changes to commit in {repo_path}")
-        else:
+        #if result.stdout.strip() != "":
+        #    print(f"✅ No changes to commit in {repo_path}")
+        if True:
+            try:
+                result = subprocess.run(["git", "pull"], capture_output=True, text=True, check=True, cwd=repo_path)
+                print(f"📥 Output from git pull in {repo_path}:\n{result.stdout}")
+                if result.stderr:
+                    print(f"⚠️ Errors from git pull in {repo_path}:\n{result.stderr}")
+            except subprocess.CalledProcessError as e:
+                print(f"❗ Error running git pull in {repo_path}: {e}")
+                print(f"📤 STDOUT:\n{e.stdout}")
+                print(f"❌ STDERR:\n{e.stderr}")
+
             result = subprocess.run(["git", "add", "."], capture_output=True, text=True, check=True, cwd=repo_path)
             print(f"📥 Output from git add in {repo_path}:\n{result.stdout}")
             if result.stderr:
@@ -107,7 +117,7 @@ with DAG(
     dag_id='SERVER_GIT_backup',
     default_args=default_args,
     #schedule_interval=default_args["schedule_interval"],
-    schedule_interval="0 7 * * 1-5",
+    schedule_interval="0,10,20,30 7 * * 1-5",
     tags=['GIT', 'BACKUP']
 ) as dag_SERV_GIT_BACKUP:
     backup_git_task = PythonOperator(

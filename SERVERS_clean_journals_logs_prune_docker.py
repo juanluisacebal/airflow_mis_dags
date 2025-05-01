@@ -39,7 +39,7 @@ with DAG(
 
     REMOTE_S1_clean_journal = BashOperator(
         task_id='REMOTE_S1_clean_journal',
-        bash_command='ssh s1 "journalctl --vacuum-time=7d"',
+        bash_command='ssh s1 "journalctl --vacuum-time=3d"',
     )
 
     LOCAL_docker_prune_and_log_freed_space = BashOperator(

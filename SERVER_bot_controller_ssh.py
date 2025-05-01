@@ -10,7 +10,6 @@ This DAG orchestrates a Docker-based bot lifecycle in four main steps:
  
 Variables used:
 - `ruta_bots`: Base path where bot-related files are stored.
-- `ruta_volumen_selenium`: Volume path shared with Docker container.
 - `min_diff_ejecucion_bot`: Minimum minutes allowed between DAG runs.
  
 Tags: ["bot", "docker"]
@@ -41,7 +40,7 @@ chromium_profile_path = os.path.join(bot_path, "perfiles_docker", "Juan")
 os.makedirs(chromium_profile_path, exist_ok=True)
 
 
-def build_docker_image():
+def build_docker_image_ssh():
     from airflow.utils.log.logging_mixin import LoggingMixin
     logger = LoggingMixin().log
 
@@ -65,7 +64,7 @@ def build_docker_image():
 
     return True
 
-def run_and_stream(cmd, logger):
+def run_and_stream_ssh(cmd, logger):
     logger.info(f"🚀 Running command: {cmd}")
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, shell=isinstance(cmd, str))
     for line in iter(process.stdout.readline, ''):
@@ -138,15 +137,15 @@ def should_run(session=None, **context):
 
 
 
-def start_bot():
+def start_bot_ssh():
     """
     Runs the Docker container for the bot in detached mode with the specified volume.
     Logs both stdout and stderr output.
     """
     from airflow.utils.log.logging_mixin import LoggingMixin
     logger = LoggingMixin().log
-    volume_path = Variable.get("ruta_volumen_selenium")
-    ssh_command = f'ssh s1 "docker run --rm -d --name l-bot --network host --dns=8.8.8.8 --ulimit nofile=32768:32768 -e host=dd-s1 --shm-size 2g -v {volume_path}:/home/seluser l-bot-custom"'
+    volume_path = Variable.get("ruta_bots")
+    ssh_command = f'ssh s1 "docker run --rm -d --name l-bot --network host --hostname s1 --dns=8.8.8.8 --ulimit nofile=32768:32768 -e host=dd-s1 --shm-size 2g -v {volume_path}:/home/seluser l-bot-custom"'
     logger.info(f"🚀 Running start command: {ssh_command}")
     logger.info(f"[COMMAND] {ssh_command}")
     result = subprocess.run(ssh_command, capture_output=True, text=True, shell=True)
@@ -154,7 +153,7 @@ def start_bot():
     logger.info(f"[docker run] STDERR:\n{result.stderr}")
     result.check_returncode()
 
-def run_bot():
+def run_bot_ssh():
     """
     Runs the bot script (main.py) inside the running Docker container 'l-bot'.
     Executes main.py within the shared volume path.
@@ -165,7 +164,7 @@ def run_bot():
     # Pre-copy the Chrome profile before executing the script
     #profile_src = "/home/seluser/compartido/Perfiles/*"
     #profile_dest = "/home/seluser/.config/"
-    # cp -a  /home/seluser/compartido/Perfiles/. /home/seluser/.config/
+    # cp -a  /home/seluser/compartido/Perfiles_s1/. /home/seluser/.config/
     #copy_command = f'ssh s1 "docker exec -u seluser l-bot bash -c \\"mkdir -p \'{profile_dest}\' && cp -r \'{profile_src}/.\' \'{profile_dest}/\'\\""'
     #logger.info(f"🚀 Running profile copy command: {copy_command}")
     #logger.info(f"[COMMAND] {copy_command}")
@@ -178,11 +177,11 @@ def run_bot():
     main_command = f'ssh s1 "docker exec -u seluser -w /home/seluser l-bot python3 main.py"'
     logger.info(f"🚀 Running main bot script command: {main_command}")
     logger.info(f"[COMMAND] {main_command}")
-    run_and_stream(main_command, logger)
+    run_and_stream_ssh(main_command, logger)
     # If main_command fails, run_and_stream already raises an exception
     logger.info("✅ Bot script completed successfully.")
 
-def stop_bot():
+def stop_bot_ssh():
     """
     Stops the Docker container l-bot.
     Logs both stdout and stderr output.
@@ -199,9 +198,9 @@ def stop_bot():
 with DAG(
     dag_id="SERVER_bot_controller_ssh",
     default_args=default_args,
-    schedule_interval=default_args["schedule_interval"],
+    #schedule_interval=default_args["schedule_interval"],
 
-    #schedule_interval="30 * * * *",
+    schedule_interval="10 * * * *",
     #schedule_interval="@hourly",
     tags=["bot", "docker"],
     doc_md="""
@@ -217,7 +216,6 @@ with DAG(
     
     ### ⚙️ Configuration Variables
     - `ruta_bots`: Root path of bot project files.
-    - `ruta_volumen_selenium`: Host path mounted into Docker container at `/home/seluser/compartido`.
     - `min_diff_ejecucion_bot`: Time threshold (in minutes) to avoid DAG overlap.
     
     ### 🕐 Schedule
@@ -239,27 +237,27 @@ with DAG(
         python_callable=should_run,
     )
 
-    docker_build_image = PythonOperator(
-        task_id="docker_build_image",
-        python_callable=build_docker_image,
+    s1_docker_build_image = PythonOperator(
+        task_id="s1_docker_build_image",
+        python_callable=build_docker_image_ssh,
     )
 
 
-    docker_up = PythonOperator(
-        task_id="docker_up",
-        python_callable=start_bot,
+    s1_docker_up = PythonOperator(
+        task_id="s1_docker_up",
+        python_callable=start_bot_ssh,
     )
 
-    run_bot_task = PythonOperator(
-        task_id="run_bot_task",
-        python_callable=run_bot,
+    s1_run_bot_task = PythonOperator(
+        task_id="s1_run_bot_task",
+        python_callable=run_bot_ssh,
         retries=4,
         retry_delay=timedelta(seconds=30),
     )
 
     docker_down = PythonOperator(
         task_id="docker_down",
-        python_callable=stop_bot,
+        python_callable=stop_bot_ssh,
         trigger_rule="all_done",  # Ensure this runs even if the previous task fails
     )
 
@@ -281,7 +279,7 @@ with DAG(
     )'''
 
 #check_if_should_run >> docker_prune_and_log_freed_space >> LOCAL_reboot_and_wait >> docker_build_image >> docker_up >> run_bot_task >> docker_down
-check_if_should_run >> docker_prune_and_log_freed_space  >> docker_build_image >> docker_up >> run_bot_task >> docker_down
+check_if_should_run >> docker_prune_and_log_freed_space  >> s1_docker_build_image >> s1_docker_up >> s1_run_bot_task >> docker_down
 
 """
 ## 📄 DAG Documentation: SERVER_bot_controller_ssh
@@ -296,7 +294,6 @@ This DAG automates the execution of a Selenium-based bot inside a Docker contain
 
 ### ⚙️ Configuration Variables
  - `ruta_bots`: Root path of bot project files.
- - `ruta_volumen_selenium`: Host path mounted into Docker container at `/home/seluser/compartido`.
  - `min_diff_ejecucion_bot`: Time threshold (in minutes) to avoid DAG overlap.
 
 ### 🕐 Schedule

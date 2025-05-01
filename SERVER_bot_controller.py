@@ -10,7 +10,6 @@ This DAG orchestrates a Docker-based bot lifecycle in four main steps:
  
 Variables used:
 - `ruta_bots`: Base path where bot-related files are stored.
-- `ruta_volumen_selenium`: Volume path shared with Docker container.
 - `min_diff_ejecucion_bot`: Minimum minutes allowed between DAG runs.
  
 Tags: ["bot", "docker"]
@@ -27,12 +26,16 @@ import os
 from datetime import datetime, timedelta
 from airflow.utils.timezone import utcnow
 import time
+from airflow.utils.log.logging_mixin import LoggingMixin
+from airflow.operators.bash import BashOperator
 
 default_args = Variable.get("default_args", deserialize_json=True)
 default_args["start_date"] = datetime.strptime(default_args["start_date"], "%Y-%m-%d")
 default_args["retry_delay"] = timedelta(minutes=default_args.pop("retry_delay_minutes"))
 
-# Hola
+HOSTS = Variable.get("hosts_bot", default_var="s1", deserialize_json=False).split(",")
+MIN=0.01#0.01
+MAX=0.5#0.02
 
 bot_path = Variable.get("ruta_bots")
 def build_docker_image():
@@ -67,8 +70,10 @@ def run_and_stream(cmd, logger):
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     for line in iter(process.stdout.readline, ''):
         logger.info(line.strip())
+    print("Finished streaming")
     process.stdout.close()
     returncode = process.wait()
+    print(f"Return code: {returncode}")
     if returncode != 0:
         raise subprocess.CalledProcessError(returncode, cmd)
 
@@ -86,10 +91,8 @@ def should_run(session=None, **context):
     threshold_time = now - timedelta(minutes=minutes)
     logger.info(f"🕒 Current UTC time: {now.isoformat()}")
     logger.info(f"⏳ Threshold (min_diff_ejecucion_bot): {minutes} minutes ago = {threshold_time.isoformat()}")
-
     logger.info(f"⏱ Checking for active DAG runs in the past {minutes} minutes (since {threshold_time.isoformat()})...")
     dag_run_id = context["dag_run"].run_id
-
     from airflow.models import TaskInstance
     dag_runs = (
         session.query(DagRun)
@@ -110,7 +113,7 @@ def should_run(session=None, **context):
             .filter(
                 TaskInstance.dag_id == run.dag_id,
                 TaskInstance.run_id == run.run_id,
-                TaskInstance.task_id == "run_bot_task",
+                TaskInstance.task_id == "s0_docker_build_image",
             )
             .scalar()
         )
@@ -132,80 +135,250 @@ def should_run(session=None, **context):
     logger.info("✅ No recent active executions. Proceeding with DAG run.")
     return True
 
-def start_bot():
-    """
-    Runs the Docker container for the bot in detached mode with the specified volume.
-    Logs both stdout and stderr output.
-    """
-    from airflow.utils.log.logging_mixin import LoggingMixin
+def start_bot(container_name="l-bot", port_offset=0):
     logger = LoggingMixin().log
-    volume_path = Variable.get("ruta_volumen_selenium")
-    run_command = [
-        "docker", "run", "--rm", "-d",
-        "--name", "l-bot",
-        "-p", "4444:4444", "-p", "5900:5900", "-p", "7900:7900",
-        "--shm-size", "2g",
-        "-v", f"{volume_path}:/home/seluser/compartido",
-        #"seleniarm/standalone-chromium:latest"
-        "l-bot-custom"
+    
+    ports = [
+        f"{4444+port_offset}:4444",
+        f"{5900+port_offset}:5900",
+        f"{7900+port_offset}:7900"
     ]
+    container_hostname = f"s0-{port_offset}"
+    run_command = [
+    "docker", "run", "--rm", "-d",
+    "--name", container_name,
+    "--hostname", container_hostname,  # <-- nuevo parámetro
+    "-p", ports[0], "-p", ports[1], "-p", ports[2],
+    "--shm-size", "2g",
+    "-v", f"{bot_path}:/home/seluser/compartido",
+    "l-bot-custom"
+    ]
+    
     logger.info(f"[COMMAND] {' '.join(run_command)}")
     result = subprocess.run(run_command, capture_output=True, text=True)
     logger.info(f"[docker run] STDOUT:\n{result.stdout}")
     logger.info(f"[docker run] STDERR:\n{result.stderr}")
     result.check_returncode()
 
-def run_bot():
-    """
-    Runs the bot script (main.py) inside the running Docker container 'l-bot'.
-    Executes main.py within the shared volume path.
-    """
+
+
+def copy_files(container_name="l-bot"):
     time.sleep(5)  # Wait for the container to be fully up and running
-    from airflow.utils.log.logging_mixin import LoggingMixin
     logger = LoggingMixin().log
 
-    # Pre-copy the Chrome profile before executing the script
-    profile_src = "/home/seluser/compartido/Perfiles/Profile 1/Default"
+    profile_src = f"/home/seluser/compartido/Perfiles_s0/Profile 1/Default"
     profile_dest = "/home/seluser/.config/chromium/Profile 1/Default"
 
     copy_command = [
-        "docker", "exec", "-u", "seluser", "l-bot",
+        "docker", "exec", "-u", "seluser", container_name,
         "bash", "-c",
+         f"mkdir -p \"{profile_src}\"",
         f"mkdir -p \"{profile_dest}\" && cp -r \"{profile_src}/.\" \"{profile_dest}/\""
     ]
     logger.info(f"[COMMAND] {' '.join(copy_command)}")
     run_and_stream(copy_command, logger)
 
+
+
+def run_bot(container_name="l-bot", config_filename="config.json",**context):
+    """
+    Runs the bot script (main.py) inside the running Docker container 'l-bot'.
+    Executes main.py within the shared volume path.
+    Accepts a config_filename parameter to specify the config file.
+    """
+    
+    from airflow.utils.log.logging_mixin import LoggingMixin
+    from datetime import datetime
+    import time
+
+    logger = LoggingMixin().log
+    ti = context["ti"]
+
+    start_time = utcnow()
+
+    # Esperar si hay una marca de tiempo previa en XCom
+    next_time = ti.xcom_pull(task_ids="run_bot_lock", key="next_allowed_time")
+    if next_time:
+        logger.info(f"⏳ Esperando hasta {next_time} para ejecutar run_bot en s0")
+        while utcnow() < datetime.fromisoformat(next_time):
+            time.sleep(2)
+
+    # Devolver la próxima hora de inicio permitida
+    next_exec = (start_time + timedelta(seconds=60)).isoformat()
+    ti.xcom_push(key="next_allowed_time", value=next_exec)
+    logger.info(f"✅ Próxima ejecución permitida después de: {next_exec}")
+
+    
     main_command = [
-        "docker", "exec", "-u", "seluser", "-w", "/home/seluser/compartido", "l-bot",
-        "python3", "main.py"
+        "docker", "exec", "-t", "-u", "seluser", "-w", "/home/seluser/compartido", container_name,
+        "python3", "main.py", f"{MIN}", f"{MAX}", "--config", config_filename
     ]
+
     logger.info(f"[COMMAND] {' '.join(main_command)}")
     run_and_stream(main_command, logger)
     # If main_command fails, run_and_stream already raises an exception
     logger.info("✅ Bot script completed successfully.")
 
-def stop_bot():
+
+def stop_bot(container_name="l-bot"):
     """
     Stops the Docker container l-bot.
     Logs both stdout and stderr output.
     """
-    from airflow.utils.log.logging_mixin import LoggingMixin
     logger = LoggingMixin().log
-    logger.info(f"[COMMAND] docker stop l-bot")
-    result = subprocess.run(["docker", "stop", "l-bot"], capture_output=True, text=True)
-    logger.info(f"[docker stop l-bot] STDOUT:\n{result.stdout}")
-    logger.info(f"[docker stop l-bot] STDERR:\n{result.stderr}")
+    stop_command = ["docker", "stop", container_name]
+    logger.info(f"[COMMAND] {' '.join(stop_command)}")
+    result = subprocess.run(stop_command, capture_output=True, text=True)
+    logger.info(f"[{stop_command}] STDOUT:\n{result.stdout}")
+    logger.info(f"[{stop_command}] STDERR:\n{result.stderr}")
     result.check_returncode()
 
-def schedule_reboot():
+
+    
+
+
+def schedule_reboot(host_name):
+    os.environ["PATH"] += os.pathsep + "/snap/bin"
     from airflow.utils.log.logging_mixin import LoggingMixin
     logger = LoggingMixin().log
-    reboot_command = ["sudo", "shutdown", "-r", "+5"]
+    reboot_command = ["ssh", host_name, "sudo reboot"]
     logger.info(f"[COMMAND] {' '.join(reboot_command)}")
     result = subprocess.run(reboot_command, capture_output=True, text=True)
     logger.info(f"[reboot command] STDOUT:\n{result.stdout}")
     logger.info(f"[reboot command] STDERR:\n{result.stderr}")
+    time.sleep(20)
+
+
+
+
+def start_bot_ssh(host_name):
+    """
+    Runs the Docker container for the bot in detached mode with the specified volume.
+    Logs both stdout and stderr output.
+    """
+    os.environ["PATH"] += os.pathsep + "/snap/bin"
+    from airflow.utils.log.logging_mixin import LoggingMixin
+    logger = LoggingMixin().log
+    ssh_command = f'ssh {host_name} "docker run --rm -d --name l-bot --network host --hostname {host_name} --dns=8.8.8.8 --ulimit nofile=32768:32768 --shm-size 2g -v {bot_path}:/home/seluser l-bot-custom"'
+    logger.info(f"🚀 Running start command: {ssh_command}")
+    logger.info(f"[COMMAND] {ssh_command}")
+    result = subprocess.run(ssh_command, capture_output=True, text=True, shell=True)
+    logger.info(f"[docker run] STDOUT:\n{result.stdout}")
+    logger.info(f"[docker run] STDERR:\n{result.stderr}")
+    result.check_returncode()
+
+def run_bot_ssh(host_name, **context):
+    """
+    Runs the bot script (main.py) inside the running Docker container 'l-bot'.
+    Executes main.py within the shared volume path.
+    """
+    os.environ["PATH"] += os.pathsep + "/snap/bin"
+    from airflow.utils.log.logging_mixin import LoggingMixin
+    from datetime import datetime
+    import time
+
+    logger = LoggingMixin().log
+    ti = context["ti"]
+
+    start_time = utcnow()
+
+    # Esperar si hay una marca de tiempo previa en XCom
+    next_time = ti.xcom_pull(task_ids="run_bot_lock", key="next_allowed_time")
+    if next_time:
+        logger.info(f"⏳ Esperando hasta {next_time} para ejecutar {host_name}")
+        while utcnow() < datetime.fromisoformat(next_time):
+            time.sleep(2)
+
+    # Devolver la próxima hora de inicio permitida
+    next_exec = (start_time + timedelta(seconds=60)).isoformat()
+    ti.xcom_push(key="next_allowed_time", value=next_exec)
+    logger.info(f"✅ Próxima ejecución permitida después de: {next_exec}")
+
+    # Ejecutar el bot
+    main_command = f'ssh {host_name} "docker exec -u seluser -w /home/seluser l-bot python3 main.py {MIN} {MAX} --config conf-{host_name}.json --responses resp-{host_name}.json"'
+    logger.info(f"[COMMAND] {main_command}")
+    run_and_stream_ssh(main_command, logger)
+    # If main_command fails, run_and_stream already raises an exception
+    logger.info("✅ Bot script completed successfully.")
+
+def stop_bot_ssh(host_name):
+    """
+    Stops the Docker container l-bot.
+    Logs both stdout and stderr output.
+    """
+    os.environ["PATH"] += os.pathsep + "/snap/bin"
+    from airflow.utils.log.logging_mixin import LoggingMixin
+    logger = LoggingMixin().log
+    logger.info(f"🚀 Running stop command: ssh {host_name} \"docker stop l-bot\"")
+    logger.info(f"[COMMAND] ssh {host_name} \"docker stop l-bot\"")
+    result = subprocess.run(f'ssh {host_name} "docker stop l-bot"', capture_output=True, text=True, shell=True)
+    logger.info(f"[docker stop l-bot] STDOUT:\n{result.stdout}")
+    logger.info(f"[docker stop l-bot] STDERR:\n{result.stderr}")
+    result.check_returncode()
+
+
+    # ⬇️ Copiar archivos JSON del host remoto a local
+    local_path = os.path.join(bot_path, "json-remotos")
+    os.makedirs(local_path, exist_ok=True)
+    remote_path = os.path.join(bot_path, "*.json")
+    copy_command = f"scp -v {host_name}:{remote_path} {local_path}/"
+    logger.info(f"[COMMAND] {copy_command}")
+    result = subprocess.run(copy_command, shell=True, capture_output=True, text=True)
+    logger.info(f"[scp JSON files] STDOUT:\n{result.stdout}")
+    logger.info(f"[scp JSON files] STDERR:\n{result.stderr}")
+
+
+
+def build_docker_image_ssh(host_name):
+    os.environ["PATH"] += os.pathsep + "/snap/bin"
+    from airflow.utils.log.logging_mixin import LoggingMixin
+    logger = LoggingMixin().log
+
+    # Mostrar el PATH actual para debug
+    print(f"🧪 PATH actual (incluye /snap/bin): {os.environ['PATH']}")
+    result = subprocess.run("which gcloud", shell=True, capture_output=True, text=True)
+    logger.info(f"🧪 which gcloud → {result.stdout.strip()}")
+
+    # 1) Copiar archivos
+    sync_cmd = f'scp {bot_path}/main.py  {host_name}:{bot_path}/'
+    # {bot_path}/Dockerfile
+    logger.info(f"[COMMAND] {sync_cmd}")
+    subprocess.run(sync_cmd, shell=True, check=True, text=True)
+
+    # 2) Build en remoto
+
+    build_command = f'bash {bot_path}/build_remote.sh {host_name}'
+    #"cd {bot_path} && docker build --network=host -t l-bot-custom ."'    
+    logger.info(f"🛠️ Building Docker image with command: {build_command}")
+    logger.info(f"[COMMAND] {build_command}")
+
+    try:
+        process = subprocess.Popen(build_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, shell=True)
+        for line in iter(process.stdout.readline, ''):
+            logger.info(line.strip())
+        process.stdout.close()
+        returncode = process.wait()
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, build_command)
+        logger.info("✅ Docker image built successfully.")
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"⚠️ Docker build failed with return code {e.returncode}, but continuing: {e}")
+    except Exception as e:
+        logger.warning(f"⚠️ Unexpected error during Docker build: {e}, continuing anyway.")
+
+    return True
+
+def run_and_stream_ssh(cmd, logger):
+    os.environ["PATH"] += os.pathsep + "/snap/bin"
+    logger.info(f"🚀 Running command: {cmd}")
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, shell=isinstance(cmd, str))
+    for line in iter(process.stdout.readline, ''):
+        logger.info(line.strip())
+    process.stdout.close()
+    returncode = process.wait()
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
+
 
 def nada():
     print("Nada")
@@ -232,7 +405,6 @@ with DAG(
     
     ### ⚙️ Configuration Variables
     - `ruta_bots`: Root path of bot project files.
-    - `ruta_volumen_selenium`: Host path mounted into Docker container at `/home/seluser/compartido`.
     - `min_diff_ejecucion_bot`: Time threshold (in minutes) to avoid DAG overlap.
     
     ### 🕐 Schedule
@@ -249,43 +421,188 @@ with DAG(
     4. Shuts down the Docker container.
     """
 
+    docker_up_1 = PythonOperator(
+        task_id="s0-1_docker_up_t",
+        python_callable=nada, #start_bot,
+        op_kwargs={"container_name": "l-bot-1", "port_offset": 0},
+    )
+
+    docker_up_2 = PythonOperator(
+        task_id="s0-2_docker_up_t",
+        python_callable=nada, #start_bot,
+        op_kwargs={"container_name": "l-bot-2", "port_offset": 1},
+    )
+
+    copy_files_task_1 = PythonOperator(
+        task_id="s0-1_copy_files_t",
+        python_callable=copy_files,
+        op_kwargs={"container_name": "l-bot-1"},
+        retries=2,
+        retry_delay=timedelta(seconds=10),
+    )
+
+    copy_files_task_2 = PythonOperator(
+        task_id="s0-2_copy_files_t",
+        python_callable=copy_files,
+        op_kwargs={"container_name": "l-bot-2"},
+        retries=2,
+        retry_delay=timedelta(seconds=10),
+    )
+
+    run_bot_task_1 = PythonOperator(
+        task_id="s0-1_run_bot_t",
+        python_callable=run_bot,
+        op_kwargs={"container_name": "l-bot-1", "config_filename": "config.json"},
+        retries=2,
+        retry_delay=timedelta(seconds=10),
+    )
+
+    run_bot_task_2 = PythonOperator(
+        task_id="s0-2_run_bot_t",
+        python_callable=run_bot, #nada,
+        op_kwargs={"container_name": "l-bot-2", "config_filename": "config-u2.json"},
+        retries=2,
+        retry_delay=timedelta(seconds=10),
+    )
+
+    docker_down_1 = PythonOperator(
+        task_id="s0-1_docker_down_t",
+        python_callable=stop_bot,
+        op_kwargs={"container_name": "l-bot-1"},
+        trigger_rule="all_done",
+        retries=2,
+        retry_delay=timedelta(seconds=10),
+    )
+
+    docker_down_2 = PythonOperator(
+        task_id="s0-2_docker_down_t",
+        python_callable=stop_bot,
+        op_kwargs={"container_name": "l-bot-2"},
+        trigger_rule="all_done",
+        retries=2,
+        retry_delay=timedelta(seconds=10),
+    )
+
+
     check_if_should_run = ShortCircuitOperator(
-        task_id="check_if_should_run",
+        task_id="check_should_run",
         python_callable=should_run,
+        retries=2,
+        retry_delay=timedelta(seconds=10),
     )
     
     docker_build_image = PythonOperator(
-        task_id="docker_build_image",
+        task_id="s0_docker_build_t",
         python_callable=build_docker_image,
+        retries=2,
+        retry_delay=timedelta(seconds=10),
     )
 
-    docker_up = PythonOperator(
-        task_id="docker_up",
-        python_callable=start_bot,
-    )
 
-    run_bot_task = PythonOperator(
-        task_id="run_bot_task",
-        python_callable=run_bot,
+
+    call_llm_task = PythonOperator(
+        task_id="s0_call_llm_t",
+        python_callable=nada,
         retries=4,
         retry_delay=timedelta(seconds=15),
     )
 
-    docker_down = PythonOperator(
-        task_id="docker_down",
-        python_callable=stop_bot,
-        trigger_rule="all_done",  # Ensure this runs even if the previous task fails
+    s0_prune_log_t = BashOperator(
+        task_id=f"s0_prune_log_t",
+        bash_command=f'''
+        echo "📦 Docker usage before:"
+        BEFORE=$("docker system df -v" | tee /tmp/docker_before.txt | grep "Total space used" | awk '{{print $4, $5}}')
+        "docker system prune -a --volumes --force"
+        echo "📦 Docker usage after:"
+        AFTER=$("docker system df -v" | tee /tmp/docker_after.txt | grep "Total space used" | awk '{{print $4, $5}}')
+        echo "🧹 Freed space: $BEFORE -> $AFTER"
+        ''',
+        retries=3,
+        retry_delay=timedelta(seconds=10),
+        trigger_rule="all_done",
     )
-    
-'''    schedule_reboot_task = PythonOperator(
-        task_id="schedule_reboot",
-        python_callable=schedule_reboot,
-    )
-'''
-#docker_build_image >> docker_up >> run_bot_task >> docker_down >> check_if_should_run 
-check_if_should_run >> docker_build_image >> docker_up >> run_bot_task >> docker_down 
-#>> schedule_reboot_task
 
+
+
+
+
+dynamic_tasks = {}
+
+for i, host in enumerate(HOSTS):
+    prev_host = HOSTS[i - 1] if i > 0 else None
+
+    dynamic_tasks[f"{host}_docker_build_image"] = PythonOperator(
+        task_id=f"{host}_docker_build_t",
+        python_callable=build_docker_image_ssh,
+        op_kwargs={"host_name": host},
+        retries=2,
+        retry_delay=timedelta(seconds=10),
+    )
+
+    dynamic_tasks[f"{host}_docker_up"] = PythonOperator(
+        task_id=f"{host}_docker_up_t",
+        python_callable=start_bot_ssh,
+        op_kwargs={"host_name": host},
+        retries=2,
+        retry_delay=timedelta(seconds=10),
+    )
+
+    dynamic_tasks[f"{host}_run_bot_task"] = PythonOperator(
+        task_id=f"{host}_run_bot_t",
+        python_callable=run_bot_ssh,
+        op_kwargs={"host_name": host},
+        retries=1,
+        retry_delay=timedelta(seconds=10),
+    )
+    if prev_host:
+        dynamic_tasks[f"{host}_run_bot_task"].op_kwargs["prev_task_id"] = f"{prev_host}_run_bot_t"
+    
+    dynamic_tasks[f"{host}_docker_down"] = PythonOperator(
+        task_id=f"{host}_docker_down_t",
+        python_callable=stop_bot_ssh,
+        op_kwargs={"host_name": host},
+        retries=1,
+        trigger_rule="all_done",
+        retry_delay=timedelta(seconds=10),
+    )
+
+    dynamic_tasks[f"{host}_reboot"] = PythonOperator(
+        task_id=f"{host}_reboot_t",
+        python_callable=schedule_reboot,
+        op_kwargs={"host_name": host},
+        retries=1,
+        retry_delay=timedelta(seconds=10),
+        trigger_rule="all_done",
+    )
+    dynamic_tasks[f"{host}_docker_prune_and_log_freed_space"] = BashOperator(
+        task_id=f"{host}_prune_log_t",
+        bash_command=f'''
+        echo "📦 Docker usage before:"
+        BEFORE=$(ssh {host} "docker system df -v" | tee /tmp/docker_before.txt | grep "Total space used" | awk '{{print $4, $5}}')
+        ssh {host}  "docker system prune -a --volumes --force"
+        ssh {host} 'rm -r /home/juanlu/Documentos/BOTS/google-chrome/Profile\ 1_*'
+        echo "📦 Docker usage after:"
+        AFTER=$(ssh {host} "docker system df -v" | tee /tmp/docker_after.txt | grep "Total space used" | awk '{{print $4, $5}}')
+        echo "🧹 Freed space: $BEFORE -> $AFTER"
+        ''',
+        retries=3,
+        retry_delay=timedelta(seconds=10),
+        trigger_rule="all_done",
+    )
+
+
+check_if_should_run >> call_llm_task >> docker_build_image >>[ docker_up_1, docker_up_2]
+docker_up_1 >> copy_files_task_1 >> run_bot_task_1 >> docker_down_1
+docker_up_2 >> copy_files_task_2 >> run_bot_task_2 >> docker_down_2 
+[docker_down_1, docker_down_2] >> s0_prune_log_t
+
+for host in HOSTS:
+    check_if_should_run >> dynamic_tasks[f"{host}_docker_build_image"]
+    dynamic_tasks[f"{host}_docker_build_image"] >> dynamic_tasks[f"{host}_docker_up"]
+    dynamic_tasks[f"{host}_docker_up"] >> dynamic_tasks[f"{host}_run_bot_task"]
+    dynamic_tasks[f"{host}_run_bot_task"] >> dynamic_tasks[f"{host}_docker_down"]
+    dynamic_tasks[f"{host}_docker_down"] >> dynamic_tasks[f"{host}_docker_prune_and_log_freed_space"]
+    dynamic_tasks[f"{host}_docker_prune_and_log_freed_space"] >> dynamic_tasks[f"{host}_reboot"]
 """
 ## 📄 DAG Documentation: SERVER_bot_controller
 
@@ -299,7 +616,6 @@ This DAG automates the execution of a Selenium-based bot inside a Docker contain
 
 ### ⚙️ Configuration Variables
  - `ruta_bots`: Root path of bot project files.
- - `ruta_volumen_selenium`: Host path mounted into Docker container at `/home/seluser/compartido`.
  - `min_diff_ejecucion_bot`: Time threshold (in minutes) to avoid DAG overlap.
 
 ### 🕐 Schedule
