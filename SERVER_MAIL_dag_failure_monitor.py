@@ -28,55 +28,25 @@ default_args["start_date"] = datetime.strptime(default_args["start_date"], "%Y-%
 default_args["retry_delay"] = timedelta(minutes=default_args.pop("retry_delay_minutes"))
 
 
-
 class EmailOperatorWithLog(EmailOperator):
-    """
-    Custom EmailOperator that logs recipient, subject, and content details before sending.
-    Uses direct SMTP connection instead of Airflow's default email sending mechanism.
-    """
-    def __init__(self, smtp_conn_id=None, *args, **kwargs):
-        self.smtp_conn_id = smtp_conn_id or 'smtp_default'
-        super().__init__(*args, **kwargs)
-
-    def execute(self, context):
-        logging.info("Starting EmailOperatorWithLog...")
-        logging.info("Recipients: %s", self.to)
-        logging.info("Subject: %s", self.subject)
-        logging.info("HTML Content:\n%s", self.html_content)
-        
-        try:
-            # Get SMTP connection details from Airflow connection
-            conn = BaseHook.get_connection(self.conn_id or self.smtp_conn_id)
-            
-            # Create email message
-            msg = MIMEText(self.html_content, "html")
-            msg["Subject"] = self.subject
-            msg["From"] = self.from_email or conn.login
-            recipients = self.to if isinstance(self.to, list) else [self.to]
-            msg["To"] = ", ".join(recipients)
-            
-            # Log email sending details
-            logging.info("✉️ Sending email using %s connection.", self.conn_id or self.smtp_conn_id)
-            logging.info("From: %s, To: %s", msg["From"], msg["To"])
-            logging.info("Subject: %s", msg["Subject"])
-            logging.info("Connecting to SMTP server with STARTTLS...")
-            
-            # Send email via SMTP
-            with SMTP(conn.host, conn.port) as server:
-                server.ehlo()
-                context = ssl.create_default_context()
-                server.starttls(context=context)
-                server.ehlo()
-                logging.info("Logging in...")
-                server.login(conn.login, conn.password)
-                logging.info("Sending email...")
-                server.sendmail(msg["From"], recipients, msg.as_string())
-                
-            logging.info("Email sent successfully.")
-            return True
-        except Exception as e:
-            logging.error("Failed to send email: %s", str(e))
-            raise e
+     """
+     Custom EmailOperator that logs recipient, subject, and content details before sending.
+     """
+     def __init__(self, smtp_conn_id=None, *args, **kwargs):
+         if smtp_conn_id:
+             kwargs['conn_id'] = smtp_conn_id
+         super().__init__(*args, **kwargs)
+ 
+     def execute(self, context):
+         logging.info("Starting EmailOperatorWithLog...")
+         logging.info("Recipients: %s", self.to)
+         logging.info("Subject: %s", self.subject)
+         logging.info("HTML Content:\n%s", self.html_content)
+         result = super().execute(context)
+         logging.info("Email sent successfully. Result: %s", result)
+         return result
+ 
+ 
 
 # Configuration values
 HOURS_WINDOW = 48
@@ -349,6 +319,11 @@ html_template = """
 </html>
 """
 
+
+
+
+
+
 html_content = html_template.replace("HOURS_WINDOW", str(HOURS_WINDOW))
 html_content = html_content.replace("DAYS_SHORT", str(DAYS_SHORT))
 html_content = html_content.replace("DAYS_LONG", str(DAYS_LONG))
@@ -381,7 +356,7 @@ with DAG(
         to=notification_emails,
         subject=f'[AIRFLOW ALERTS] Failed DAGs in the last {HOURS_WINDOW} hours',
         html_content=html_content,
-        smtp_conn_id='smtp'
+        smtp_conn_id='smtp_default'
     )
 
     t_initialize_vars >> t_get_failed_lists >> t_check_notification >> t_send_email
