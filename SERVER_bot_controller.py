@@ -32,6 +32,9 @@ from airflow.utils.log.logging_mixin import LoggingMixin
 from airflow.models import TaskInstance
 from datetime import datetime
 import time
+import psutil  # al inicio del archivo si no lo tienes
+
+
 
 default_args = Variable.get("default_args", deserialize_json=True)
 default_args["start_date"] = datetime.strptime(default_args["start_date"], "%Y-%m-%d")
@@ -41,8 +44,8 @@ ruta_airflow = Variable.get("ruta_airflow")
 HOSTS = Variable.get("hosts_bot", default_var="s1", deserialize_json=False).split(",")
 
 
-MIN=0.25#0.01
-MAX=0.3#0.02
+MIN=3.25#0.01
+MAX=4.3#0.02
 
 bot_path = Variable.get("ruta_bots")
 def build_docker_image():
@@ -167,8 +170,10 @@ def start_bot(container_name="l-bot", port_offset=0):
     ]
     container_hostname = f"s0-{port_offset}"
     run_command = [
-    "docker", "run", "--rm", "-d",
+    "docker", "run", #"--rm",
+    "-d",
     "--name", container_name,
+    "--network", "host",
     #"--ulimit", "nofile=32768",
     "--hostname", container_hostname,  # <-- nuevo parámetro
     "-p", ports[0], "-p", ports[1], "-p", ports[2],
@@ -205,7 +210,7 @@ def copy_files(container_name="l-bot"):
 
 
 
-def run_bot(container_name="l-bot", config_filename="config.json", responses_filename='json-remotos/resp-s0.json',**context):
+def run_bot(container_name="l-bot", config_filename="config.json", responses_filename='json/resp-s0.json',**context):
     """
     Runs the bot script (main.py) inside the running Docker container 'l-bot'.
     Executes main.py within the shared volume path.
@@ -270,38 +275,49 @@ def schedule_reboot(host_name):
     time.sleep(20)
 
 
+def kill_process_on_port(port):
+    for conn in psutil.net_connections(kind="inet"):
+        if conn.status == psutil.CONN_LISTEN and conn.laddr.port == port:
+            if conn.pid:
+                try:
+                    os.kill(conn.pid, 9)
+                    print(f"🧹 Killed process {conn.pid} on port {port}")
+                except Exception as e:
+                    print(f"❌ Could not kill PID {conn.pid}: {e}")
 
 
-def start_bot_ssh(host_name):
-    """
-    Runs the Docker container for the bot in detached mode with the specified volume.
-    Logs both stdout and stderr output.
-    """
+def run_docker(host_name, **context):
     logger = LoggingMixin().log
-
+    
+    port_offset = int(host_name[-1])  # extrae 1 de 's1'
     ports = [
-        "4444:4444",
-        "5900:5900",
-        "7900:7900"
+        f"{4446 + port_offset}:4444",
+        f"{5902 + port_offset}:5900",
+        f"{7902 + port_offset}:7900"
     ]
-    imagen = "l-bot-custom"
-    container_hostname = f"{host_name}"
+
+    ssh_path = os.path.expanduser("~/.ssh")
+
     run_command = [
-        "ssh", host_name,
-        f"docker", "run", "--rm", "-d",
-        "--name","l-bot",
-        "--hostname", f"{container_hostname} ",
-        f"--network", "host", 
-        "--dns=8.8.8.8",
-        "--ulimit", "nofile=32768",
-        f"-p {ports[0]} -p {ports[1]} -p {ports[2]} ",
-        "--shm-size 2g",
+        #"ssh", host_name,
+        "docker", "run",
+        "--rm",
+        "-d",
+        "--name", f"l-bot-{host_name}",
+        "--hostname", f"{host_name}",
+        "--network", "bridge",
+        #"--dns=8.8.8.8",
+        #"--ulimit", "nofile=32768",
+        "-p", ports[0], "-p", ports[1], "-p", ports[2],
+        "--shm-size=2g",
         #"-e SE_VNC_NO_PASSWORD=false",
         #"-e SE_VNC_PORT=5900",
         #"-e SE_START_VNC=true",
-        "-v", "tmpfs:/tmp",
-        "-v", "tmpfs:/home/seluser/.cache",
-        f"-v {bot_path}/{host_name}:/home/seluser/compartido {imagen}"
+        #"-v", "tmpfs:/tmp",
+        #"-v", "tmpfs:/home/seluser/.cache",
+        "-v", f"{ssh_path}:/home/seluser/.ssh:ro",
+        "-v", f"{bot_path}:/home/seluser/compartido",
+        "l-bot-custom"
     ]
 
     logger.info(f"[COMMAND] {' '.join(run_command)}")
@@ -310,15 +326,7 @@ def start_bot_ssh(host_name):
     logger.info(f"[docker run] STDERR:\n{result.stderr}")
     result.check_returncode()
 
-    # Instalar selenium y webdriver-manager dentro del contenedor ya iniciado
-    install_cmd = f'ssh {host_name} "docker exec -u seluser l-bot pip install selenium==4.19.0 webdriver-manager==4.0.1"'
-    logger.info(f"[COMMAND] {install_cmd}")
-    #result = subprocess.run(install_cmd, capture_output=True, text=True, shell=True)
-    #logger.info(f"[pip install] STDOUT:\n{result.stdout}")
-    #logger.info(f"[pip install] STDERR:\n{result.stderr}")
-    result.check_returncode()
 
-    #
 
 def run_bot_ssh(host_name, **context):
     """
@@ -326,21 +334,6 @@ def run_bot_ssh(host_name, **context):
     Executes main.py within the shared volume path.
     """
     logger = LoggingMixin().log
-    # BORRAR:
-    
-    #cmd_cp = f' ssh {host_name} "sudo cp -a /home/seluser/.config/google-chrome /home/seluser/"'
-    #logger.info(f"[cp] {cmd_cp}")
-    #result = subprocess.run(cmd_cp, capture_output=True, text=True, shell=True)
-    #logger.info(f"[cp] STDOUT:\n{result.stdout}")
-    #logger.info(f"[cp] STDERR:\n{result.stderr}")
-
-    if host_name == "s3" or host_name == "s2" or host_name == "s1":
-        #BORRAR cmd_cp = f' ssh {host_name} "sudo cp -a /home/seluser/.config/google-chrome /home/seluser/"'  # BORRAR
-        cmd = f'ssh {host_name} "docker exec -d l-bot x11vnc -display :99.0 -nopw -forever -logfile /tmp/x11vnc.log"'
-        logger.info(f"[COMMAND] {cmd}")
-        #result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
-        #logger.info(f"[x11vnc] STDOUT:\n{result.stdout}")
-        #logger.info(f"[x11vnc] STDERR:\n{result.stderr}")
 
 
     ti = context["ti"]
@@ -359,38 +352,47 @@ def run_bot_ssh(host_name, **context):
     ti.xcom_push(key="next_allowed_time", value=next_exec)
     logger.info(f"✅ Próxima ejecución permitida después de: {next_exec}")
 
-    # Ejecutar el bot
-    #main_command = f'ssh {host_name} "docker exec -u seluser -w /home/seluser/compartido l-bot python3 main.py --config conf-{host_name}.json --responses resp-{host_name}.json {MIN} {MAX} "'
-    #logger.info(f"[COMMAND] {main_command}")
-    
-    # Para s1, esperar 1200 segundos antes de ejecutar el comando para usar el contenedor y comprobaciones
-    #if host_name == "s1":
-    #logger.info(f"⏳ Esperando 1200 segundos")
-    #time.sleep(1200)
+    # Crear túnel SOCKS5 en el host
+    proxy_base_port = 1080
+    proxy_offset = int(host_name[-1]) if host_name[-1].isdigit() else 0
+    proxy_port = proxy_base_port + proxy_offset
 
-    # run_and_stream_ssh(main_command, logger)
-    # If main_command fails, run_and_stream already raises an exception
-    #result = subprocess.run(main_command, shell=True, capture_output=True, text=True)
-    #logger.info(f"[stdout]\n{result.stdout}")
-    #logger.info(f"[stderr]\n{result.stderr}")
-    #result.check_returncode()
+    #kill_process_on_port(proxy_port)
+    #subprocess.run(f"pkill -f 'ssh.*-D {proxy_port}'", shell=True)
 
-    #process = subprocess.Popen(main_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    #for line in iter(process.stdout.readline, ''):
-    #    logger.info(line.strip())
-    #process.stdout.close()
-    #returncode = process.wait()
-    #if returncode != 0:
-    #    raise subprocess.CalledProcessError(returncode, main_command)
-    
-    main_command = [
-    "ssh", host_name,
-    "docker", "exec", "-u", "seluser", "-w", f"/home/seluser/compartido", "l-bot",
-    "python3", "main.py",
-    "--config", f"conf-{host_name}.json",
-    "--responses", f"resp-{host_name}.json",
-    str(MIN), str(MAX)
+    socks_command = [
+        "ssh", "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-D", str(proxy_port), host_name, "-N", "-f"
     ]
+    
+    #time.sleep(120)
+    try:
+        logger.info(f"[COMMAND] {' '.join(socks_command)}")
+        #process = subprocess.Popen(socks_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        #stdout, stderr = process.communicate(timeout=5)
+        #logger.info(f"[ssh -D] STDOUT:\n{stdout}")
+        #logger.info(f"[ssh -D] STDERR:\n{stderr}")
+    except subprocess.TimeoutExpired:
+        logger.info(f"✅ SOCKS proxy launched successfully in background on port {proxy_port}")
+    except Exception as e:
+        logger.error(f"❌ Error launching SOCKS proxy: {e}")
+        raise
+
+    tiempo_minimo=MIN
+    tiempo_maximo=MAX
+
+    main_command = [
+    #"ssh", host_name,
+    "docker", "exec", "-u", "seluser", "-w", f"/home/seluser/compartido", f"l-bot-{host_name}",
+    "python3", "main.py",
+    "--config", f"json/conf-{host_name}.json",
+    "--responses", f"json/resp-{host_name}.json",
+    str(tiempo_minimo), str(tiempo_maximo)
+    ]
+
+    logger.info(f"[COMMAND] {' '.join(main_command)}")
+
     process = subprocess.Popen(main_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
     for line in iter(process.stdout.readline, ''):
@@ -405,8 +407,6 @@ def run_bot_ssh(host_name, **context):
     logger.info("✅ Bot script completed successfully.")    
     logger.info("✅ Bot script completed successfully.")
 
-
-
 def stop_bot_ssh(host_name):
     """
     Stops the Docker container l-bot.
@@ -415,88 +415,12 @@ def stop_bot_ssh(host_name):
     logger = LoggingMixin().log
     logger.info(f"🚀 Running stop command: ssh {host_name} \"docker stop l-bot\"")
     logger.info(f"[COMMAND] ssh {host_name} \"docker stop l-bot\"")
-    result = subprocess.run(f'ssh {host_name} "docker stop l-bot"', capture_output=True, text=True, shell=True)
+    result = subprocess.run(f'"docker stop l-bot-{host_name}"', capture_output=True, text=True, shell=True)
     logger.info(f"[docker stop l-bot] STDOUT:\n{result.stdout}")
     logger.info(f"[docker stop l-bot] STDERR:\n{result.stderr}")
     result.check_returncode()
 
 
-    # ⬇️ Copiar archivos JSON del host remoto a local
-    local_path = os.path.join(bot_path, "json-remotos")
-    os.makedirs(local_path, exist_ok=True)
-    remote_path = os.path.join(bot_path, host_name, "*.json")
-    copy_command = f"scp -v {host_name}:{remote_path} {local_path}/"
-    logger.info(f"[COMMAND] {copy_command}")
-    result = subprocess.run(copy_command, shell=True, capture_output=True, text=True)
-    logger.info(f"[scp JSON files] STDOUT:\n{result.stdout}")
-    logger.info(f"[scp JSON files] STDERR:\n{result.stderr}")
-
-    local_path = os.path.join(bot_path, "debug-logs")
-    remote_path = os.path.join(bot_path, host_name, "debug-logs")
-    patterns = ["log", "png", "html"]
-    remote_sources = " ".join(f"{host_name}:{remote_path}/*.{ext}" for ext in patterns)
-    copy_command = f"scp -v {remote_sources} {local_path}/"
-    logger.info(f"[COMMAND] {copy_command}")
-    result = subprocess.run(copy_command, shell=True, capture_output=True, text=True)
-    logger.info(f"[scp logs files] STDOUT:\n{result.stdout}")
-    logger.info(f"[scp logs files] STDERR:\n{result.stderr}")
-
-
-
-def build_docker_image_ssh(host_name):
-    logger = LoggingMixin().log
-    logger.info(f"⬆️ Copiar archivo main.py del local al remoto")
-    # 1) Copiar archivos
-    sync_cmd = f'scp  -v {bot_path}/main.py  {bot_path}/{host_name}/Dockerfile {host_name}:{bot_path}/{host_name}/'
-    # {bot_path}/Dockerfile
-    logger.info(f"[COMMAND] {sync_cmd}")
-    subprocess.run(sync_cmd, shell=True, check=True, text=True)
-
-    logger.info(f"⬆️ Copiar archivos JSON específicos del local al remoto")
-    # ⬆️ Copiar archivos JSON específicos del local al remoto
-    local_conf = os.path.join(bot_path, "json-remotos", f"conf-{host_name}.json")
-    local_resp = os.path.join(bot_path, "json-remotos",  f"resp-{host_name}.json")
-    remote_dest = f"{host_name}:{bot_path}/{host_name}/"
-
-    for local_file in [local_conf, local_resp]:
-        copy_json_cmd = f"scp -v {local_file} {remote_dest}"
-        logger.info(f"[COMMAND] {copy_json_cmd}")
-        result = subprocess.run(copy_json_cmd, shell=True, capture_output=True, text=True)
-        logger.info(f"[scp -v {os.path.basename(local_file)}] STDOUT:\n{result.stdout}")
-        logger.info(f"[scp -v {os.path.basename(local_file)}] STDERR:\n{result.stderr}")
-
-    # 2) Build en remoto via SSH
-    build_cmd = [
-        "ssh", host_name,
-        "bash", "-lc",
-        f"cd {bot_path}/{host_name} && pwd && ls -la && "
-        f"docker build --network=host -t l-bot-custom "
-        f"-f {bot_path}/{host_name}/Dockerfile {bot_path}/{host_name}"
-    ]
-    logger.info(f"🛠️ Building via SSH: {' '.join(build_cmd)}")
-
-    # Ejecutar SIN check=True para que no lance la excepción de inmediato
-    result = subprocess.run(
-        build_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=600
-    )
-
-    # Loggear TODO lo que devolvió Docker
-    for line in result.stdout.splitlines():
-        logger.info(line)
-
-    # Si falló, que se vea bien
-    if result.returncode != 0:
-        logger.error(f"🚨 Remote build exited {result.returncode}")
-        # relanzar incluyendo el output para que Airflow marque FAIL
-        raise subprocess.CalledProcessError(
-            result.returncode, build_cmd, output=result.stdout
-        )
-
-    logger.info("✅ Docker image built successfully on remote host.")
 
 def run_and_stream_ssh(cmd, logger):
     logger.info(f"🚀 Running command: {cmd}")
@@ -589,8 +513,8 @@ with DAG(
     run_bot_task_1 = PythonOperator(
         task_id="s0-1_run_bot_t",
         python_callable=run_bot,
-        op_kwargs={"container_name": "l-bot-1", "config_filename": "json-remotos/conf-s0-0.json"},
-        retries=7,
+        op_kwargs={"container_name": "l-bot-1", "config_filename": "json/conf-s0-0.json"},
+        retries=2,
         trigger_rule="all_done",
         retry_delay=timedelta(seconds=15)
     )
@@ -598,7 +522,7 @@ with DAG(
     run_bot_task_2 = PythonOperator(
         task_id="s0-2_run_bot_t",
         python_callable=run_bot, #nada,
-        op_kwargs={"container_name": "l-bot-2", "config_filename": "json-remotos/conf-s0-1.json"},
+        op_kwargs={"container_name": "l-bot-2", "config_filename": "json/conf-s0-1.json"},
         retries=2,
         trigger_rule="all_done",
         retry_delay=timedelta(seconds=10)
@@ -642,7 +566,8 @@ with DAG(
     call_llm_task = BashOperator(
         task_id="ALL_call_llm_t",
         bash_command=f"""python3 {ruta_airflow}/scripts/llm.py
-        sleep 40                
+        docker stop l-bot-1 l-bot-2 l-bot-s3 l-bot-s2 l-bot-s1
+        sleep 5                
         """,
         retries=2,
         retry_delay=timedelta(seconds=10)
@@ -672,29 +597,20 @@ dynamic_tasks = {}
 for i, host in enumerate(HOSTS):
     prev_host = HOSTS[i - 1] if i > 0 else None
 
-    dynamic_tasks[f"{host}_docker_build_image"] = PythonOperator(
-        task_id=f"{host}_docker_build_t",
-        python_callable=build_docker_image_ssh,
-        op_kwargs={"host_name": host},
-        retries=5,
-        trigger_rule="all_done",
-        retry_delay=timedelta(seconds=15)
-    )
-
-    dynamic_tasks[f"{host}_docker_up"] = PythonOperator(
-        task_id=f"{host}_docker_up_t",
-        python_callable=start_bot_ssh,
+    dynamic_tasks[f"{host}_run_docker_task"] = PythonOperator(
+        task_id=f"{host}_run_docker_t",
+        python_callable=run_docker,
         op_kwargs={"host_name": host},
         retries=2,
         trigger_rule="all_done",
-        retry_delay=timedelta(seconds=10)
+        retry_delay=timedelta(seconds=15)
     )
 
     dynamic_tasks[f"{host}_run_bot_task"] = PythonOperator(
         task_id=f"{host}_run_bot_t",
         python_callable=run_bot_ssh,
         op_kwargs={"host_name": host},
-        retries=7,
+        retries=2,
         trigger_rule="all_done",
         retry_delay=timedelta(seconds=15)
     )
@@ -739,16 +655,17 @@ for i, host in enumerate(HOSTS):
 check_if_should_run  >> docker_build_image >>[ docker_up_1, docker_up_2]
 docker_up_1 >> copy_files_task_1 >> run_bot_task_1 >> docker_down_1
 docker_up_2 >> copy_files_task_2 >> run_bot_task_2 >> docker_down_2 
-[docker_down_1, docker_down_2] >> s0_prune_log_t
+[docker_down_1, docker_down_2] >> s0_prune_log_t >> call_llm_task
+
+
 
 for host in HOSTS:
-    [check_if_should_run  ] >> dynamic_tasks[f"{host}_docker_build_image"]
-    dynamic_tasks[f"{host}_docker_build_image"] >> dynamic_tasks[f"{host}_docker_up"]
-    dynamic_tasks[f"{host}_docker_up"] >> dynamic_tasks[f"{host}_run_bot_task"]
+    [docker_build_image  ] >> dynamic_tasks[f"{host}_run_docker_task"]
+    dynamic_tasks[f"{host}_run_docker_task"] >> dynamic_tasks[f"{host}_run_bot_task"]
     dynamic_tasks[f"{host}_run_bot_task"] >> dynamic_tasks[f"{host}_docker_down"]
     [dynamic_tasks[f"{host}_docker_down"] ]>> dynamic_tasks[f"{host}_docker_prune_and_log_freed_space"]
-    [dynamic_tasks[f"{host}_docker_prune_and_log_freed_space"], s0_prune_log_t ]>> dynamic_tasks[f"{host}_reboot"]
-    [dynamic_tasks[f"{host}_reboot"]  ]>> call_llm_task
+    [dynamic_tasks[f"{host}_docker_prune_and_log_freed_space"] ]>> dynamic_tasks[f"{host}_reboot"]
+    [dynamic_tasks[f"{host}_reboot"]  ]>> s0_prune_log_t
     #[docker_down_1, docker_down_2] >> s0_prune_log_t
     #    [dynamic_tasks[f"{host}_docker_down"] , docker_down_1, docker_down_2]>> [dynamic_tasks[f"{host}_docker_prune_and_log_freed_space"],s0_prune_log_t]
 
