@@ -43,13 +43,72 @@ default_args["retry_delay"] = timedelta(minutes=default_args.pop("retry_delay_mi
 ruta_airflow = Variable.get("ruta_airflow")
 HOSTS = Variable.get("hosts_bot", default_var="s1", deserialize_json=False).split(",")
 #HOSTS=['s1','s2','s3']
-HOSTS=['s0-1','s0-2']
+#HOSTS=['s0-1','s0-2']
 
 
-MIN=4.13#0.01
-MAX=5.15#0.02
+MIN=1.1#0.01
+MAX=1.5#0.02
 
 bot_path = Variable.get("ruta_bots")
+
+@provide_session
+def should_run(session=None, **context):
+    """
+    Short-circuits the DAG if another run has been active within the last X minutes.
+    Uses the Airflow variable 'min_diff_ejecucion_bot' to determine the time window.
+    """
+    logger = LoggingMixin().log
+
+    now = utcnow()
+    minutes = int(Variable.get("min_diff_ejecucion_bot", default_var=5))
+    threshold_time = now - timedelta(minutes=minutes)
+    logger.info(f"🕒 Current UTC time: {now.isoformat()}")
+    logger.info(f"⏳ Threshold (min_diff_ejecucion_bot): {minutes} minutes ago = {threshold_time.isoformat()}")
+    logger.info(f"⏱ Checking for active DAG runs in the past {minutes} minutes (since {threshold_time.isoformat()})...")
+    dag_run_id = context["dag_run"].run_id
+    dag_runs = (
+        session.query(DagRun)
+        .filter(
+            DagRun.dag_id == context["dag"].dag_id,
+            DagRun.execution_date > threshold_time,
+        )
+        .all()
+    )
+
+
+    recent_runs = []
+    for run in dag_runs:
+        if run.run_id == dag_run_id:
+            continue  # skip current run
+
+        run_bot_state = (
+            session.query(TaskInstance.state)
+            .filter(
+                TaskInstance.dag_id == run.dag_id,
+                TaskInstance.run_id == run.run_id,
+                TaskInstance.task_id == "s0_docker_build_t",
+            )
+            .scalar()
+        )
+        if run_bot_state != State.SKIPPED:
+            recent_runs.append(run)
+
+    logger.info(f"🗓 Total recent executions with non-skipped tasks: {len(recent_runs)}")
+
+    if recent_runs:
+        most_recent = max([run.execution_date for run in recent_runs])
+        minutes_passed = int((now - most_recent).total_seconds() // 60)
+        minutes_remaining = minutes - minutes_passed
+        logger.info(f"⏱ Time since last run: {minutes_passed} minutes. Remaining: {minutes_remaining} minutes.")
+
+    if recent_runs:
+        logger.warning("🚫 A recent active execution exists. Skipping this DAG run.")
+        return False
+
+    logger.info("✅ No recent active executions. Proceeding with DAG run.")
+    return True
+
+
 def build_docker_image():
 
     logger = LoggingMixin().log
@@ -91,64 +150,6 @@ def build_docker_image():
         raise
 
     return True
-
-
-@provide_session
-def should_run(session=None, **context):
-    """
-    Short-circuits the DAG if another run has been active within the last X minutes.
-    Uses the Airflow variable 'min_diff_ejecucion_bot' to determine the time window.
-    """
-    logger = LoggingMixin().log
-
-    now = utcnow()
-    minutes = int(Variable.get("min_diff_ejecucion_bot", default_var=5))
-    threshold_time = now - timedelta(minutes=minutes)
-    logger.info(f"🕒 Current UTC time: {now.isoformat()}")
-    logger.info(f"⏳ Threshold (min_diff_ejecucion_bot): {minutes} minutes ago = {threshold_time.isoformat()}")
-    logger.info(f"⏱ Checking for active DAG runs in the past {minutes} minutes (since {threshold_time.isoformat()})...")
-    dag_run_id = context["dag_run"].run_id
-    dag_runs = (
-        session.query(DagRun)
-        .filter(
-            DagRun.dag_id == "SERVER_bot_controller",
-            DagRun.execution_date > threshold_time,
-        )
-        .all()
-    )
-
-    recent_runs = []
-    for run in dag_runs:
-        if run.run_id == dag_run_id:
-            continue  # skip current run
-
-        run_bot_state = (
-            session.query(TaskInstance.state)
-            .filter(
-                TaskInstance.dag_id == run.dag_id,
-                TaskInstance.run_id == run.run_id,
-                TaskInstance.task_id == "s0_docker_build_t",
-            )
-            .scalar()
-        )
-        if run_bot_state != State.SKIPPED:
-            recent_runs.append(run)
-
-    logger.info(f"🗓 Total recent executions with non-skipped tasks: {len(recent_runs)}")
-
-    if recent_runs:
-        most_recent = max([run.execution_date for run in recent_runs])
-        minutes_passed = int((now - most_recent).total_seconds() // 60)
-        minutes_remaining = minutes - minutes_passed
-        logger.info(f"⏱ Time since last run: {minutes_passed} minutes. Remaining: {minutes_remaining} minutes.")
-
-    if recent_runs:
-        logger.warning("🚫 A recent active execution exists. Skipping this DAG run.")
-        return False
-
-    logger.info("✅ No recent active executions. Proceeding with DAG run.")
-    return True
-
 
 
 
@@ -355,197 +356,83 @@ def nada():
     print("Nada")
 
 
-with DAG(
-    dag_id="SERVER_bot_controller",
-    default_args=default_args,
-    #schedule_interval=default_args["schedule_interval"],
-    schedule_interval="*/5 * * * *",
-    #schedule_interval="00,15,30,45 * * * *",
-    #schedule_interval="@hourly",
-    tags=["bot", "docker"],
-    doc_md="""
-    ## 📄 DAG Documentation: SERVER_bot_controller
-    
-    This DAG automates the execution of a Selenium-based bot inside a Docker container.
-    
-    ### 🔁 Workflow Steps
-    - **check_if_should_run**: Prevents overlapping runs by checking if another execution occurred recently.
-    - **docker_up**: Spins up a Docker container using the image `l-bot-custom`.
-    - **run_bot_task**: Executes `main.py` inside the running container. Prior to execution, it copies a Chromium profile into the container.
-    - **docker_down**: Stops the container after bot execution, regardless of success or failure.
-    
-    ### ⚙️ Configuration Variables
-    - `ruta_bots`: Root path of bot project files.
-    - `min_diff_ejecucion_bot`: Time threshold (in minutes) to avoid DAG overlap.
-    
-    ### 🕐 Schedule
-    - Every hour (`@hourly`)
-    
-    ### 🏷 Tags
-    - `bot`, `docker`
-    """,
-) as dag:
-    """Hourly DAG that controls a Docker-based bot lifecycle:
-    1. Checks recent DAG runs to avoid overlapping execution.
-    2. Starts Docker container.
-    3. Executes the bot.
-    4. Shuts down the Docker container.
-    """
 
-
-
-    check_if_should_run = ShortCircuitOperator(
-        task_id="check_should_run",
-        python_callable=should_run,
-        retries=2,
-        retry_delay=timedelta(seconds=10)
-    )
-    
-    docker_build_image = PythonOperator(
-        task_id="s0_docker_build_t",
-        python_callable=build_docker_image,
-        retries=2,
-        retry_delay=timedelta(seconds=10)
-    )
-
-
-
-    call_llm_task = BashOperator(
-        task_id="ALL_call_llm_t",
-        bash_command=f"""python3 {ruta_airflow}/scripts/llm.py
-        docker stop l-bot-1 l-bot-2 l-bot-s3 l-bot-s2 l-bot-s1
-        sleep 5                
-        """,
-        retries=2,
-        retry_delay=timedelta(seconds=10)
-    )
-
-    s0_prune_log_t = BashOperator(
-        task_id=f"s0_prune_log_t",
-        bash_command=f'''
-        echo "📦 Docker usage before:"
-        BEFORE=$("docker system df -v" | tee /tmp/docker_before.txt | grep "Total space used" | awk '{{print $4, $5}}')
-        docker system prune -a --volumes --force
-        echo "📦 Docker usage after:"
-        AFTER=$("docker system df -v" | tee /tmp/docker_after.txt | grep "Total space used" | awk '{{print $4, $5}}')
-        echo "🧹 Freed space: $BEFORE -> $AFTER"
-        ''',
-        retries=2,
-        retry_delay=timedelta(seconds=10),
-        trigger_rule="all_done"
-    )
-
-
-
-
-
-dynamic_tasks = {}
-
-# DAG construction: Only create reboot tasks for hosts not starting with "s0"
-for i, host in enumerate(HOSTS):
-    prev_host = HOSTS[i - 1] if i > 0 else None
-
-    dynamic_tasks[f"{host}_run_docker_task"] = PythonOperator(
-        task_id=f"{host}_run_docker_t",
-        python_callable=run_docker,
-        op_kwargs={"host_name": host},
-        retries=2,
-        trigger_rule="all_done",
-        retry_delay=timedelta(seconds=15)
-    )
-
-    dynamic_tasks[f"{host}_run_bot_task"] = PythonOperator(
-        task_id=f"{host}_run_bot_t",
-        python_callable=run_bot_ssh,
-        op_kwargs={"host_name": host},
-        retries=2,
-        trigger_rule="all_done",
-        retry_delay=timedelta(seconds=15)
-    )
-    if prev_host:
-        dynamic_tasks[f"{host}_run_bot_task"].op_kwargs["prev_task_id"] = f"{prev_host}_run_bot_t"
-
-    dynamic_tasks[f"{host}_docker_down"] = PythonOperator(
-        task_id=f"{host}_docker_down_t",
-        python_callable=stop_bot_ssh,
-        op_kwargs={"host_name": host},
-        retries=1,
-        trigger_rule="all_done",
-        retry_delay=timedelta(seconds=10)
-    )
-
-    # Only create reboot task for hosts not starting with "s0"
-    if not host.startswith("s0"):
-        dynamic_tasks[f"{host}_reboot"] = PythonOperator(
-            task_id=f"{host}_reboot_t",
-            python_callable=schedule_reboot,
-            op_kwargs={"host_name": host},
-            retries=1,
-            retry_delay=timedelta(seconds=10),
-            trigger_rule="all_done"
-        )
-# Only create prune task for hosts not in ["s0-1", "s0-2"]
-    if host not in ["s0-1", "s0-2"]:
-        dynamic_tasks[f"{host}_docker_prune_and_log_freed_space"] = BashOperator(
-            task_id=f"{host}_prune_log_t",
-            bash_command=f'''
-            echo "📦 Docker usage before:"
-            BEFORE=$(ssh {host} "docker system df -v" | tee /tmp/docker_before.txt | grep "Total space used" | awk '{{print $4, $5}}')
-            ssh {host}  "docker system prune -a --volumes --force"
-            ssh {host} 'rm -r /home/juanlu/Documentos/BOTS/google-chrome/Profile\ 1_*'
-            echo "📦 Docker usage after:"
-            AFTER=$(ssh {host} "docker system df -v" | tee /tmp/docker_after.txt | grep "Total space used" | awk '{{print $4, $5}}')
-            echo "🧹 Freed space: $BEFORE -> $AFTER"
-            ''',
-            retries=2,
-            retry_delay=timedelta(seconds=10),
-            trigger_rule="all_done"
-        )
-#        ssh {host}  "docker system prune -a --volumes --force"
-
-
-check_if_should_run  >> docker_build_image 
-s0_prune_log_t >> call_llm_task
-
-
+# --- MULTI-DAG GENERATION ---
+dags = {}
 
 for host in HOSTS:
-    [docker_build_image] >> dynamic_tasks[f"{host}_run_docker_task"]
-    dynamic_tasks[f"{host}_run_docker_task"] >> dynamic_tasks[f"{host}_run_bot_task"]
-    dynamic_tasks[f"{host}_run_bot_task"] >> dynamic_tasks[f"{host}_docker_down"]
-    # Handle prune and dependencies
-    if host not in ["s0-1", "s0-2"]:
-        [dynamic_tasks[f"{host}_docker_down"]] >> dynamic_tasks[f"{host}_docker_prune_and_log_freed_space"]
-        dynamic_tasks[f"{host}_docker_prune_and_log_freed_space"] >> s0_prune_log_t
-    else:
-        dynamic_tasks[f"{host}_docker_down"] >> s0_prune_log_t
-    # Ensure prune -> reboot -> s0_prune_log_t sequence for hosts not starting with "s0"
-    if not host.startswith("s0"):
-        dynamic_tasks[f"{host}_docker_prune_and_log_freed_space"] >> dynamic_tasks[f"{host}_reboot"]
-        dynamic_tasks[f"{host}_reboot"] >> s0_prune_log_t
+    dag_id = f"SERVER_bot_controller_{host}"
 
-# s0_prune_log_t leads to call_llm_task
-s0_prune_log_t >> call_llm_task
+    with DAG(
+        dag_id=dag_id,
+        default_args=default_args,
+        schedule_interval="@hourly",
+        #schedule_interval="@daily",
+        #schedule_interval="*/30 * * * *",
+        tags=["bot", "docker"],
+        doc_md=f"""
+        ## 📄 DAG Documentation: {dag_id}
 
+        This DAG automates the execution of a Selenium-based bot inside a Docker container for host `{host}`.
 
-"""
-## 📄 DAG Documentation: SERVER_bot_controller
+        ### 🔁 Workflow Steps
+        - **check_if_should_run**: Prevents overlapping runs.
+        - **docker_up**: Spins up a Docker container.
+        - **run_bot_task**: Executes `main.py`.
+        - **docker_down**: Stops the container.
 
-This DAG automates the execution of a Selenium-based bot inside a Docker container.
+        ### ⚙️ Configuration Variables
+        - `ruta_bots`
+        - `min_diff_ejecucion_bot`
 
-### 🔁 Workflow Steps
- - **check_if_should_run**: Prevents overlapping runs by checking if another execution occurred recently.
- - **docker_up**: Spins up a Docker container using the image `l-bot-custom`.
- - **run_bot_task**: Executes `main.py` inside the running container. Prior to execution, it copies a Chromium profile into the container.
- - **docker_down**: Stops the container after bot execution, regardless of success or failure.
+        ### 🕐 Schedule
+        - Every hour (`@hourly`)
+        """,
+    ) as dag:
+        dags[dag_id] = dag
 
-### ⚙️ Configuration Variables
- - `ruta_bots`: Root path of bot project files.
- - `min_diff_ejecucion_bot`: Time threshold (in minutes) to avoid DAG overlap.
+        check_if_should_run = ShortCircuitOperator(
+            task_id="check_should_run",
+            python_callable=should_run,
+            retries=2,
+            retry_delay=timedelta(seconds=10)
+        )
 
-### 🕐 Schedule
- - Every hour (`@hourly`)
+        docker_build_image = PythonOperator(
+            task_id="s0_docker_build_t",
+            python_callable=build_docker_image,
+            retries=2,
+            retry_delay=timedelta(seconds=10)
+        )
 
-### 🏷 Tags
- - `bot`, `docker`
-"""
+        run_docker_task = PythonOperator(
+            task_id=f"{host}_run_docker_t",
+            python_callable=run_docker,
+            op_kwargs={"host_name": host},
+            retries=2,
+            trigger_rule="all_done",
+            retry_delay=timedelta(seconds=15)
+        )
+
+        run_bot_task = PythonOperator(
+            task_id=f"{host}_run_bot_t",
+            python_callable=run_bot_ssh,
+            op_kwargs={"host_name": host},
+            retries=2,
+            trigger_rule="all_done",
+            retry_delay=timedelta(seconds=15)
+        )
+
+        docker_down = PythonOperator(
+            task_id=f"{host}_docker_down_t",
+            python_callable=stop_bot_ssh,
+            op_kwargs={"host_name": host},
+            retries=1,
+            trigger_rule="all_done",
+            retry_delay=timedelta(seconds=10)
+        )
+
+        check_if_should_run >> docker_build_image >> run_docker_task >> run_bot_task >> docker_down
+
+# Expose all generated DAGs to Airflow
+globals().update(dags)

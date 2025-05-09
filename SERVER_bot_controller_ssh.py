@@ -42,7 +42,8 @@ default_args["retry_delay"] = timedelta(minutes=default_args.pop("retry_delay_mi
 
 ruta_airflow = Variable.get("ruta_airflow")
 HOSTS = Variable.get("hosts_bot", default_var="s1", deserialize_json=False).split(",")
-HOSTS=['s1','s2','s3']
+#HOSTS=['s1','s2','s3']
+HOSTS= []
 #HOSTS=['s0-1','s0-2']
 
 
@@ -386,9 +387,9 @@ with DAG(
     dag_id="SERVER_bot_controller_ssh",
     default_args=default_args,
     #schedule_interval=default_args["schedule_interval"],
-    schedule_interval="*/5 * * * *",
+    #schedule_interval="*/5 * * * *",
     #schedule_interval="00,15,30,45 * * * *",
-    #schedule_interval="@hourly",
+    schedule_interval="@hourly",
     tags=["bot", "docker"],
     doc_md="""
     ## 📄 DAG Documentation: SERVER_bot_controller
