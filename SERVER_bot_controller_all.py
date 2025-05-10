@@ -431,6 +431,39 @@ for host in HOSTS:
             trigger_rule="all_done",
             retry_delay=timedelta(seconds=10)
         )
+        if host not in ["s0-1", "s0-2"]:
+            docker_prune_and_log_freed_space = BashOperator(
+                task_id=f"{host}_prune_log_t",
+                bash_command=f'''
+                echo "📦 Docker usage before:"
+                BEFORE=$(ssh {host} "docker system df -v" | tee /tmp/docker_before.txt | grep "Total space used" | awk '{{print $4, $5}}')
+                ssh {host}  "docker system prune -a --volumes --force"
+                ssh {host} 'rm -r /home/juanlu/Documentos/BOTS/google-chrome/Profile\ 1_*'
+                echo "📦 Docker usage after:"
+                AFTER=$(ssh {host} "docker system df -v" | tee /tmp/docker_after.txt | grep "Total space used" | awk '{{print $4, $5}}')
+                echo "🧹 Freed space: $BEFORE -> $AFTER"
+                ''',
+                retries=2,
+                retry_delay=timedelta(seconds=10),
+                trigger_rule="all_done"
+            )
+
+        if host  in ["s0-1", "s0-2"]:
+
+            s0_prune_log_t = BashOperator(
+                task_id=f"s0_prune_log_t",
+                bash_command=f'''
+                echo "📦 Docker usage before:"
+                BEFORE=$("docker system df -v" | tee /tmp/docker_before.txt | grep "Total space used" | awk '{{print $4, $5}}')
+                docker system prune -a --volumes --force
+                echo "📦 Docker usage after:"
+                AFTER=$("docker system df -v" | tee /tmp/docker_after.txt | grep "Total space used" | awk '{{print $4, $5}}')
+                echo "🧹 Freed space: $BEFORE -> $AFTER"
+                ''',
+                retries=2,
+                retry_delay=timedelta(seconds=10),
+                trigger_rule="all_done"
+            )
 
         check_if_should_run >> docker_build_image >> run_docker_task >> run_bot_task >> docker_down
 

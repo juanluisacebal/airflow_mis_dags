@@ -1,6 +1,7 @@
 from urllib.parse import quote
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.operators.bash import BashOperator
 from datetime import datetime, timedelta
 import requests
 import csv
@@ -11,8 +12,17 @@ import json
 import random
 import logging
 import pandas as pd
+from airflow.models import Variable
 
-# Lista de artistas de interés
+
+
+default_args = Variable.get("default_args", deserialize_json=True)
+default_args["start_date"] = datetime.strptime(default_args["start_date"], "%Y-%m-%d")
+default_args["retry_delay"] = timedelta(minutes=default_args.pop("retry_delay_minutes"))
+catchup = default_args.pop("catchup")
+
+
+
 ARTISTAS = [
     "Shakira", "Rosalía", "Luis Fonsi", "Enrique Iglesias", "Ricky Martin",
     "Alejandro Sanz", "Maluma", "Carlos Vives", "Juanes", "Pablo Alborán",
@@ -24,11 +34,14 @@ ARTISTAS = [
     "Romeo Santos", "Prince Royce", "La India", "Pedro Capó", "Gente de Zona"
 ]
 
-# Ruta para guardar los archivos CSV
+ARTISTAS = [
+    "Shakira" ,"Beyoncé", "Wyclef Jean"
+    ,"Alejandro Sanz", "JAY‐Z", "Lady Gaga",
+    "Juanes", "David Guetta"
+]
 OUTPUT_DIR = "/tmp/musicbrainz_data"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Función para obtener el MBID de un artista
 def get_artist_mbid(nombre_artista, max_retries=5):
     base_url = "https://musicbrainz.org/ws/2/artist/"
     query = f"?query={quote(nombre_artista)}&fmt=json"
@@ -51,8 +64,7 @@ def get_artist_mbid(nombre_artista, max_retries=5):
                 raise
 
 
-# Función auxiliar para obtener JSON usando curl y subprocess
-def curl_get_json(url, user_agent="airflow-musicbrainz/1.0 (juanlu@example.com)"):
+def curl_get_json(url, user_agent="airflow-musicbrainz/1.0 (yo@juanluisacebal.com)"):
     try:
         result = subprocess.run(
             ["curl", "-s", "-H", f"User-Agent: {user_agent}", url],
@@ -71,7 +83,6 @@ def curl_get_json(url, user_agent="airflow-musicbrainz/1.0 (juanlu@example.com)"
         logging.error("[json error] No se pudo parsear la salida de curl")
         raise
 
-# Función para obtener relaciones de un artista con reintentos y logs
 def get_artist_relations(mbid_artista, max_retries=5):
     url = f"https://musicbrainz.org/ws/2/artist/{mbid_artista}?inc=artist-rels&fmt=json"
     for intento in range(max_retries):
@@ -104,7 +115,6 @@ def get_recording_collaborations(mbid_artista, max_retries=5):
         time.sleep(1)
     return recordings
 
-# Función principal para extraer y guardar datos
 def extract_musicbrainz_data():
     artist_info_list = []
     tags_list = []
@@ -129,18 +139,9 @@ def extract_musicbrainz_data():
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(artist_data, f, ensure_ascii=False, indent=2)
 
-            # Flatten artist_data to CSV
-            try:
-                flat_df = pd.json_normalize(artist_data)
-                flat_csv_path = os.path.join(OUTPUT_DIR, f"{nombre_artista.replace(' ', '_')}-artist_flat.csv")
-                flat_df.to_csv(flat_csv_path, index=False, encoding='utf-8')
-                logging.info(f"✅ Flattened CSV saved: {flat_csv_path}")
-            except Exception as e:
-                logging.warning(f"❗ Error flattening artist_data for {nombre_artista}: {e}")
         except Exception as e:
             logging.warning(f"❗ No se pudo parsear correctamente el JSON para {nombre_artista}: {e}")
 
-        # Collect basic artist info with enriched fields
         artist_info_list.append({
             "mbid": artist_data.get("id"),
             "name": artist_data.get("name"),
@@ -153,6 +154,10 @@ def extract_musicbrainz_data():
             "rating": artist_data.get("rating", {}).get("value", None),
             "rating_count": artist_data.get("rating", {}).get("votes-count", 0)
         })
+        artist_info_list[-1]["aliases"] = artist_data.get("aliases", [])
+        artist_info_list[-1]["isnis"] = artist_data.get("isnis", [])
+        artist_info_list[-1]["relations"] = artist_data.get("relations", [])
+
         # Collect tags
         for tag in artist_data.get("tags", []):
             tags_list.append({
@@ -160,7 +165,6 @@ def extract_musicbrainz_data():
                 "tag": tag.get("name"),
                 "count": tag.get("count", 0)
             })
-        # Collect recording relations
         for rel in artist_data.get("recording-rels", []):
             rec = rel.get("recording", {})
             recordings_list.append({
@@ -169,7 +173,6 @@ def extract_musicbrainz_data():
                 "title": rec.get("title", ""),
                 "type": rec.get("type", "")
             })
-        # Collect release relations
         for rel in artist_data.get("release-rels", []):
             relinfo = rel.get("release", {})
             releases_list.append({
@@ -178,7 +181,6 @@ def extract_musicbrainz_data():
                 "title": relinfo.get("title", ""),
                 "status": relinfo.get("status", "")
             })
-        # Collect work relations
         for rel in artist_data.get("work-rels", []):
             work = rel.get("work", {})
             works_list.append({
@@ -193,7 +195,6 @@ def extract_musicbrainz_data():
             "name": nombre_artista
         })
 
-        # Artist-to-artist relations from artist_data
         for rel in artist_data.get("relations", []):
             if rel.get("target-type") == "artist":
                 target = rel["artist"]
@@ -206,14 +207,12 @@ def extract_musicbrainz_data():
                     "relation_end": rel.get("end", "")
                 })
                 if target["id"] not in processed_collaborators:
-                    # add collaborator node stub (will be enriched later)
                     nodos.append({
                         "mbid": target["id"],
                         "name": target["name"]
                     })
                     processed_collaborators.add(target["id"])
 
-        # Recording-based collaborations
         recs = get_recording_collaborations(mbid_artista)
         for rec in recs:
             for credit in rec.get("artist-credit", []):
@@ -221,7 +220,6 @@ def extract_musicbrainz_data():
                 collab_id = art.get("id")
                 collab_name = art.get("name")
                 if collab_id and collab_id != mbid_artista:
-                    # add edge for this collaboration
                     aristas.append({
                         "source": mbid_artista,
                         "target": collab_id,
@@ -229,7 +227,6 @@ def extract_musicbrainz_data():
                         "type": "recording",
                         "recording_id": rec.get("id")
                     })
-                    # add collaborator node if new
                     if collab_id not in processed_collaborators:
                         nodos.append({
                             "mbid": collab_id,
@@ -237,35 +234,39 @@ def extract_musicbrainz_data():
                         })
                         processed_collaborators.add(collab_id)
 
-        time.sleep(1)  # Respetar el límite de 1 solicitud por segundo
+        time.sleep(1)
 
-    # Write enriched nodes CSV
+    for row in artist_info_list:
+        for key in ["aliases", "isnis", "relations"]:
+            row.pop(key, None)
+
+    from datetime import datetime
+    now_str = datetime.utcnow().isoformat()
+    for row in artist_info_list:
+        row["data_extracted_at"] = now_str
+
     nodos_file = os.path.join(OUTPUT_DIR, "nodos.csv")
-    fieldnames = ["mbid", "name", "country", "gender", "area", "begin_date", "end_date", "disambiguation", "rating", "rating_count"]
+    fieldnames = ["mbid", "name", "country", "gender", "area", "begin_date", "end_date", "disambiguation", "rating", "rating_count", "data_extracted_at"]
     with open(nodos_file, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(artist_info_list)
 
-    # Guardar aristas en CSV
     aristas_file = os.path.join(OUTPUT_DIR, "aristas.csv")
     with open(aristas_file, mode="w", newline="", encoding="utf-8") as f:
-        fieldnames = ["source", "target", "target_name", "type", "recording_id"]
+        fieldnames = ["source", "target", "target_name", "type", "recording_id", "relation_begin", "relation_end"]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        # Fill missing keys with empty string for rows without recording_id
         for row in aristas:
-            if "recording_id" not in row:
-                row["recording_id"] = ""
+            for k in ["recording_id", "relation_begin", "relation_end"]:
+                row.setdefault(k, "")
         writer.writerows(aristas)
 
     from collections import Counter
 
-    # Contar aristas salientes por nodo
     conteo = Counter(a["source"] for a in aristas)
     top_10 = conteo.most_common(10)
 
-    # Guardar top 10 en CSV
     top_file = os.path.join(OUTPUT_DIR, "top10_nodos.csv")
     with open(top_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -273,62 +274,63 @@ def extract_musicbrainz_data():
         for mbid, count in top_10:
             nombre = next((n["name"] for n in nodos if n["mbid"] == mbid), "")
             writer.writerow([mbid, nombre, count])
+   
+def top10_aristas():
+    df = pd.read_csv('/tmp/musicbrainz_data/aristas.csv')
+    top=df['target_name'].value_counts().head(10).to_frame().reset_index()
+    top.to_csv('/tmp/musicbrainz_data/top10_aristas.csv', header=['target_name','count'], index=False)
+    print("Top 10 Aristas:")
+    print(top.to_string(index=False))  
 
-    # Write artist_info.csv
-    info_file = os.path.join(OUTPUT_DIR, "artist_info.csv")
-    with open(info_file, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["mbid", "name", "country", "gender", "area",
-                                              "begin_date", "end_date", "disambiguation",
-                                              "rating", "rating_count"])
-        writer.writeheader()
-        writer.writerows(artist_info_list)
+def top10_nodos():
+    df = pd.read_csv(os.path.join(OUTPUT_DIR, 'aristas.csv'))
+    df2 = pd.read_csv(os.path.join(OUTPUT_DIR, 'nodos.csv'))
 
-    # Write tags.csv
-    tags_file = os.path.join(OUTPUT_DIR, "tags.csv")
-    with open(tags_file, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["mbid", "tag", "count"])
-        writer.writeheader()
-        writer.writerows(tags_list)
+    top = (
+        df.groupby('source')
+          .size()
+          .reset_index(name='count')
+          .sort_values(by='count', ascending=False)
+          .head(10)
+    )
 
-    # Write recordings.csv
-    recordings_file = os.path.join(OUTPUT_DIR, "recordings.csv")
-    with open(recordings_file, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["mbid", "recording_id", "title", "type"])
-        writer.writeheader()
-        writer.writerows(recordings_list)
+    top = top.merge(df2[['mbid', 'name']], left_on='source', right_on='mbid', how='left')
+    top = top[['source', 'name', 'count']]  # Reordenamos columnas si querés
 
-    # Write releases.csv
-    releases_file = os.path.join(OUTPUT_DIR, "releases.csv")
-    with open(releases_file, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["mbid", "release_id", "title", "status"])
-        writer.writeheader()
-        writer.writerows(releases_list)
+    salida = os.path.join(OUTPUT_DIR, 'top10_nodos.csv')
+    top.to_csv(salida, index=False)
 
-    # Write works.csv
-    works_file = os.path.join(OUTPUT_DIR, "works.csv")
-    with open(works_file, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["mbid", "work_id", "title", "type"])
-        writer.writeheader()
-        writer.writerows(works_list)
+    print("Top 10 Nodos:")
+    print(top.to_string(index=False))
 
-# Definición del DAG
-default_args = {
-    "owner": "airflow",
-    "depends_on_past": False,
-    "start_date": datetime(2025, 5, 6),
-    "retries": 1,
-    "retry_delay": timedelta(seconds=30)
-}
+
 
 with DAG(
     dag_id="API_CSV_VDD_PEC4_musicbrainz_artist_collaborations",
     default_args=default_args,
-    schedule_interval="*/2 * * * *",
-    #schedule_interval="@daily",
-    catchup=False
+    catchup = catchup,
+    #schedule_interval=default_args["schedule_interval"],
+    #schedule_interval="*/5 * * * *"
+    schedule_interval="@daily"
+
+
 ) as dag:
+    cleanup_musicbrainz = BashOperator(
+        task_id='cleanup_musicbrainz_data',
+        bash_command='rm -rf /tmp/musicbrainz_data/*'
+    )
 
     extract_data = PythonOperator(
         task_id="extract_musicbrainz_data",
         python_callable=extract_musicbrainz_data
     )
+    task_top10_aristas = PythonOperator(
+        task_id='top10_aristas',
+        python_callable=top10_aristas,
+    )
+    task_top10_nodos = PythonOperator(
+        task_id='top10_nodos',
+        python_callable=top10_nodos,
+    )
+
+    cleanup_musicbrainz >> extract_data >> [task_top10_aristas, task_top10_nodos]

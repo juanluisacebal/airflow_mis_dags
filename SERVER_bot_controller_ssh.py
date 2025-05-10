@@ -40,12 +40,15 @@ default_args = Variable.get("default_args", deserialize_json=True)
 default_args["start_date"] = datetime.strptime(default_args["start_date"], "%Y-%m-%d")
 default_args["retry_delay"] = timedelta(minutes=default_args.pop("retry_delay_minutes"))
 
+minutes = int(Variable.get("min_diff_ejecucion_bot", default_var=5))
+
+
 ruta_airflow = Variable.get("ruta_airflow")
 HOSTS = Variable.get("hosts_bot", default_var="s1", deserialize_json=False).split(",")
 #HOSTS=['s1','s2','s3']
-HOSTS= []
+HOSTS= ['s4']
 #HOSTS=['s0-1','s0-2']
-
+minutes = 1200000
 
 MIN=0.13#0.01
 MAX=0.15#0.02
@@ -103,7 +106,6 @@ def should_run(session=None, **context):
     logger = LoggingMixin().log
 
     now = utcnow()
-    minutes = int(Variable.get("min_diff_ejecucion_bot", default_var=5))
     threshold_time = now - timedelta(minutes=minutes)
     logger.info(f"🕒 Current UTC time: {now.isoformat()}")
     logger.info(f"⏳ Threshold (min_diff_ejecucion_bot): {minutes} minutes ago = {threshold_time.isoformat()}")
