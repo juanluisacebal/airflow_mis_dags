@@ -28,11 +28,20 @@ from airflow.utils.timezone import utcnow
 import time
 from airflow.utils.log.logging_mixin import LoggingMixin
 from airflow.operators.bash import BashOperator
-from airflow.utils.log.logging_mixin import LoggingMixin
 from airflow.models import TaskInstance
 from datetime import datetime
 import time
 import psutil  # al inicio del archivo si no lo tienes
+import requests
+from airflow.models import Variable
+from airflow.models import Variable
+from airflow.utils.timezone import utcnow
+import logging
+import json
+import requests
+from airflow.utils.log.logging_mixin import LoggingMixin
+from airflow.models import Variable
+from airflow.sensors.python import PythonSensor
 
 
 
@@ -45,11 +54,82 @@ HOSTS = Variable.get("hosts_bot", default_var="s1", deserialize_json=False).spli
 #HOSTS=['s1','s2','s3']
 #HOSTS=['s0-1','s0-2']
 
+MINUTES_MIN = 260
+MINUTES_MAX = 300
 
-MIN=1.1#0.01
-MAX=1.5#0.02
+MIN = MINUTES_MIN / 60
+MAX = MINUTES_MAX / 60
+
 
 bot_path = Variable.get("ruta_bots")
+
+
+
+def call_gemini_llm(host, **context):
+    HOST = host[:2]
+    logger = LoggingMixin().log
+    api_key = Variable.get("gemini")
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+
+    input_path = f"{bot_path}/json/resp-{HOST}.json"
+    output_path = f"{bot_path}/resp-prov-{HOST}.json"
+
+    with open(input_path, "r") as f:
+        data = json.load(f)
+
+    preguntas = data.get("preguntas", {})
+    respuestas = {}
+
+    # Preparar contexto con preguntas ya respondidas
+    contexto_respondidas = [
+        f"Q: {q}\nA: {v['respuesta']}"
+        for q, v in preguntas.items()
+        if v.get("respuesta")
+    ]
+    contexto_texto = "\n\n".join(contexto_respondidas)
+
+    # Limitar a 3 preguntas sin respuesta
+    preguntas_pendientes = [
+        (pregunta, detalle) for pregunta, detalle in preguntas.items() if not detalle.get("respuesta")
+    ][:3]
+
+    for pregunta, detalle in preguntas_pendientes:
+        tipo = detalle.get("tipo", "")
+        opciones = detalle.get("opciones", [])
+        opciones_text = "\n".join(opciones) if opciones else ""
+        prompt_principal = (
+            f"""Contesta brevemente la siguiente pregunta considerando que es de tipo '{tipo}':\nPregunta: {pregunta}\nOpciones:\n{opciones_text}"""
+            if opciones_text
+            else f"Pregunta: {pregunta}"
+        )
+
+        prompt = contexto_texto + "\n\n" + prompt_principal if contexto_texto else prompt_principal
+
+        payload = {
+            "contents": [
+                {
+                    "parts": [{"text": prompt}]
+                }
+            ]
+        }
+
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            result = response.json()
+            texto = result['candidates'][0]['content']['parts'][0]['text']
+            detalle["respuesta"] = texto.strip()
+        except Exception as e:
+            logger.error(f"❌ Error con la pregunta '{pregunta}': {e}")
+            detalle["respuesta"] = None
+
+        respuestas[pregunta] = detalle
+
+    with open(output_path, "w") as f:
+        json.dump({"preguntas": respuestas}, f, indent=2)
+
+    logger.info(f"✅ Respuestas guardadas en {output_path}")
 
 @provide_session
 def should_run(session=None, **context):
@@ -62,9 +142,9 @@ def should_run(session=None, **context):
     now = utcnow()
     minutes = int(Variable.get("min_diff_ejecucion_bot", default_var=5))
     threshold_time = now - timedelta(minutes=minutes)
-    logger.info(f"🕒 Current UTC time: {now.isoformat()}")
+    logger.info(f"ℹ️ Current UTC time: {now.isoformat()}")
     logger.info(f"⏳ Threshold (min_diff_ejecucion_bot): {minutes} minutes ago = {threshold_time.isoformat()}")
-    logger.info(f"⏱ Checking for active DAG runs in the past {minutes} minutes (since {threshold_time.isoformat()})...")
+    logger.info(f"ℹ️ Checking for active DAG runs in the past {minutes} minutes (since {threshold_time.isoformat()})...")
     dag_run_id = context["dag_run"].run_id
     dag_runs = (
         session.query(DagRun)
@@ -93,29 +173,67 @@ def should_run(session=None, **context):
         if run_bot_state != State.SKIPPED:
             recent_runs.append(run)
 
-    logger.info(f"🗓 Total recent executions with non-skipped tasks: {len(recent_runs)}")
+    logger.info(f"ℹ️ Total recent executions with non-skipped tasks: {len(recent_runs)}")
 
     if recent_runs:
         most_recent = max([run.execution_date for run in recent_runs])
         minutes_passed = int((now - most_recent).total_seconds() // 60)
         minutes_remaining = minutes - minutes_passed
-        logger.info(f"⏱ Time since last run: {minutes_passed} minutes. Remaining: {minutes_remaining} minutes.")
+        logger.info(f"⏳ Time since last run: {minutes_passed} minutes. Remaining: {minutes_remaining} minutes.")
 
     if recent_runs:
-        logger.warning("🚫 A recent active execution exists. Skipping this DAG run.")
+        logger.warning("⚠️ A recent active execution exists. Skipping this DAG run.")
         return False
 
     logger.info("✅ No recent active executions. Proceeding with DAG run.")
     return True
 
 
-def build_docker_image():
+
+
+# --- Sensor to check for no recent builds ---
+
+@provide_session
+def no_recent_builds(session=None, **kwargs):
 
     logger = LoggingMixin().log
+    now = utcnow()
+    lock_key = "build_lock_timestamp"
+    minutes = int(Variable.get("espera_ejecucion_bot", default_var=5))
+    wait_seconds = minutes * 60
 
-    build_command = ["docker", "build", "-t", "l-bot-custom", "."]
+    last_timestamp_str = Variable.get(lock_key, default_var="2000-01-01T00:00:00")
+    from datetime import timezone
+    last_timestamp = datetime.fromisoformat(last_timestamp_str).replace(tzinfo=timezone.utc)
+    delta = (now - last_timestamp).total_seconds()
+
+    if delta < wait_seconds:
+        wait_remaining = wait_seconds - delta
+        logger.info(f"⏳ Locked: last build started at {last_timestamp.isoformat()}. Waiting {int(wait_remaining)}s more.")
+        return False
+
+    Variable.set(lock_key, now.isoformat())
+    logger.info(f"✅ Lock acquired. This task will proceed. New lock until { (now + timedelta(seconds=wait_seconds)).isoformat() }")
+    return True
+
+
+@provide_session
+def build_docker_image(session=None):
+    logger = LoggingMixin().log
+
+    logger.info(f"🧹 Verificando ruta bot_path: {bot_path}")
+    logger.info(f"🧹 Verificando existencia de Dockerfile en: {os.path.join(bot_path, 'Dockerfile')}")
+    logger.info(f"🧹 Verificando existencia de entrypoint.sh en: {os.path.join(bot_path, 'entrypoint.sh')}")
+    assert os.path.exists(os.path.join(bot_path, "Dockerfile")), "🚫 Dockerfile no encontrado en bot_path"
+    #assert os.path.exists(os.path.join(bot_path, "entrypoint.sh")), "🚫 entrypoint.sh no encontrado en bot_path"
+
+    build_command = ["docker", "build",
+                     #
+                     #"--dns=8.8.8.8",
+                     "--network", "host",
+                     "-t", "l-bot-custom", "."]
     logger.info(f"🛠️ Building Docker image with command: {' '.join(build_command)}")
-    logger.info(f"[COMMAND] {' '.join(build_command)}")
+    logger.info(f"🛠️ [COMMAND] {' '.join(build_command)}")
 
     try:
         # Set timeout to 30 minutes
@@ -128,46 +246,28 @@ def build_docker_image():
             timeout=1800,  # 30 minutes
             check=True
         )
-        
+
         # Log the output line by line
         for line in process.stdout.splitlines():
-            logger.info(line)
-            
+            logger.info(f"ℹ️ {line}")
+
         logger.info("✅ Docker image built successfully.")
-        
+
     except subprocess.TimeoutExpired as e:
-        logger.error(f"⚠️ Docker build timed out after 30 minutes: {e}")
+        logger.error(f"❌ Docker build timed out after 30 minutes: {e}")
         raise
     except subprocess.CalledProcessError as e:
-        logger.error(f"⚠️ Docker build failed with return code {e.returncode}")
-        logger.error("Build output:")
+        logger.error(f"❌ Docker build failed with return code {e.returncode}")
+        logger.error("❌ Build output:")
         if e.output:
             for line in e.output.splitlines():
-                logger.error(line)
+                logger.error(f"❌ {line}")
         raise
     except Exception as e:
-        logger.error(f"⚠️ Unexpected error during Docker build: {str(e)}")
+        logger.error(f"❌ Unexpected error during Docker build: {str(e)}")
         raise
 
     return True
-
-
-
-def copy_files(container_name="l-bot"):
-    time.sleep(5)  # Wait for the container to be fully up and running
-    logger = LoggingMixin().log
-
-    profile_src = f"/home/seluser/compartido/Perfiles_s0/Profile 1/Default"
-    profile_dest = "/home/seluser/.config/chromium/Profile 1/Default"
-
-    copy_command = [
-        "docker", "exec", "-u", "seluser", container_name,
-        "bash", "-c",
-         f"mkdir -p \"{profile_src}\"",
-        f"mkdir -p \"{profile_dest}\" && cp -r \"{profile_src}/.\" \"{profile_dest}/\""
-    ]
-    logger.info(f"[COMMAND] {' '.join(copy_command)}")
-    run_and_stream_ssh(copy_command, logger)
 
 
 
@@ -176,72 +276,106 @@ def copy_files(container_name="l-bot"):
 def schedule_reboot(host_name):
     logger = LoggingMixin().log
     reboot_command = ["ssh", "-vvv", host_name, "sudo reboot"]
-    logger.info(f"[COMMAND] {' '.join(reboot_command)}")
+    logger.info(f"🛠️ [COMMAND] {' '.join(reboot_command)}")
     if host_name.startswith("s0"):
-        logger.info(f"❌ Skipping reboot for {host_name} (starts with 's0').")
+        logger.info(f"ℹ️ Skipping reboot for {host_name} (starts with 's0').")
         return
-    logger.info(f"🚀 Rebooting {host_name}...")
+    logger.info(f"🛠️ Rebooting {host_name}...")
     result = subprocess.run(reboot_command, capture_output=True, text=True)
-    logger.info(f"[reboot command] STDOUT:\n{result.stdout}")
-    logger.info(f"[reboot command] STDERR:\n{result.stderr}")
+    logger.info(f"ℹ️ [reboot command] STDOUT:\n{result.stdout}")
+    logger.info(f"ℹ️ [reboot command] STDERR:\n{result.stderr}")
     time.sleep(20)
 
-
-def kill_process_on_port(port):
-    for conn in psutil.net_connections(kind="inet"):
-        if conn.status == psutil.CONN_LISTEN and conn.laddr.port == port:
-            if conn.pid:
-                try:
-                    os.kill(conn.pid, 9)
-                    print(f"🧹 Killed process {conn.pid} on port {port}")
-                except Exception as e:
-                    print(f"❌ Could not kill PID {conn.pid}: {e}")
 
 
 def run_docker(host_name, **context):
     logger = LoggingMixin().log
     # Cleanup /tmp/{hostname}*/ immediately before running the container
     cleanup_command = f'rm -rf /tmp/{host_name}*/*'
-    logger.info(f"[CLEANUP] Running: {cleanup_command}")
+    logger.info(f"🧹 [CLEANUP] Running: {cleanup_command}")
     subprocess.run(cleanup_command, shell=True, check=False)
 
-    
-    
+    # Crear red Docker personalizada si el host no empieza con "s0-"
+    custom_network = f"net_{host_name}"
     port_offset = int(host_name[-1])  # extrae 1 de 's1'
-    ports = [
-        f"{4445 + port_offset}:4444",
-        f"{5901 + port_offset}:5900",
-        f"{7901 + port_offset}:7900"
-    ]
-    if host_name == "s0-1" or host_name == "s0-2":
+    if not host_name.startswith("s0-"):
+        logger.info(f"🛠️ Creando red Docker personalizada: {custom_network}")
+        subnet = f"172.28.{100 + port_offset}.0/24"
+        subprocess.run([
+            "docker", "network", "create",
+            "--driver", "bridge",
+            "--subnet", subnet,
+            custom_network
+        ], check=False)
+
+
+    if host_name.startswith("s0"):
         ports = [
-        f"{4443 + port_offset}:4444",
-        f"{5899 + port_offset}:5900",
-        f"{7899 + port_offset}:7900"
-    ]
+            f"{4443 + port_offset}:4444",
+            f"{5899 + port_offset}:5900",
+            f"{7899 + port_offset}:7900"
+        ]
+        #if host_name == "s0-1":
+        #    port_offset=-1
+        #else:
+        #    port_offset=0
+        puertos_en_uso = ["-p", ports[0], "-p", ports[1], "-p", ports[2]]
+        extra_caps = ["-d"]
+    if not host_name.startswith("s0"):
+        ports = [
+            f"{4454 + port_offset}:4444",
+            f"{5909 + port_offset}:5900",
+            f"{7909 + port_offset}:7900"
+        ]
+        extra_caps = ["-d", "--cap-add=NET_ADMIN", "--add-host", "host.docker.internal:host-gateway"]
+        puertos_en_uso = ["-p", ports[1]]
 
 
+    host_index = HOSTS.index(host_name)
+    cpu_primary = host_index
+    cpu_secondary = 7 - host_index
+    cpu_limit = [#"--cpuset-cpus",
+                 #f"{cpu_primary},{cpu_secondary}",
+                 "--cpus=5"
+                 ]
+    # run_command (ajustar network según host_name)
     run_command = [
-        "docker", "run", "--rm",
-        "-d",
+        "docker", "run",
+        "--rm",
+        # "-d",
+        *extra_caps,
+        *cpu_limit, 
         "--name", f"l-bot-{host_name}",
-        "--network", "bridge",
-        "--add-host", "host.docker.internal:host-gateway",
-        #"--ulimit", "nofile=32768",
-        "--hostname", host_name,
-        "-p", ports[0], "-p", ports[1], "-p", ports[2],
+        "--network", custom_network if not host_name.startswith("s0-") else "bridge",
+        "--hostname", f"d-{host_name}" if not host_name.startswith("s0-") else host_name,
+        *puertos_en_uso,
+        "--tmpfs", "/tmp:rw,size=512m",
         "--shm-size", "2g",
         "-v", f"{bot_path}:/home/seluser/compartido",
         "l-bot-custom"
     ]
 
-    
-    
-    logger.info(f"[COMMAND] {' '.join(run_command)}")
+    logger.info(f"🛠️ [COMMAND] {' '.join(run_command)}")
     result = subprocess.run(run_command, capture_output=True, text=True)
-    logger.info(f"[docker run] STDOUT:\n{result.stdout}")
-    logger.info(f"[docker run] STDERR:\n{result.stderr}")
+    logger.info(f"ℹ️ [docker run] STDOUT:\n{result.stdout}")
+    logger.info(f"ℹ️ [docker run] STDERR:\n{result.stderr}")
     result.check_returncode()
+
+    segundos = 10
+
+    logger.info(f"⏳ Esperando {segundos} segundos antes de mostrar logs del entrypoint...")
+    time.sleep(segundos)
+
+    log_command = ["docker", "logs", f"l-bot-{host_name}"]
+    logger.info(f"🛠️ [COMMAND] {' '.join(log_command)}")
+    try:
+        logs_result = subprocess.run(log_command, capture_output=True, text=True, check=True)
+        logger.info(f"ℹ️ [docker logs] STDOUT:\n{logs_result.stdout}")
+        logger.info(f"ℹ️ [docker logs] STDERR:\n{logs_result.stderr}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ Error al obtener logs del contenedor: {e}")
+        logger.error(f"❌ STDOUT:\n{e.stdout}")
+        logger.error(f"❌ STDERR:\n{e.stderr}")
 
 
 
@@ -253,52 +387,77 @@ def run_bot_ssh(host_name, **context):
     Executes main.py within the shared volume path.
     """
     logger = LoggingMixin().log
-
-
-    ti = context["ti"]
-
-    start_time = utcnow()
-
-    # Esperar si hay una marca de tiempo previa en XCom
-    next_time = ti.xcom_pull(task_ids="run_bot_lock", key="next_allowed_time")
-    if next_time:
-        logger.info(f"⏳ Esperando hasta {next_time} para ejecutar {host_name}")
-        while utcnow() < datetime.fromisoformat(next_time):
-            time.sleep(2)
-
-    # Devolver la próxima hora de inicio permitida
-    next_exec = (start_time + timedelta(seconds=120)).isoformat()
-    ti.xcom_push(key="next_allowed_time", value=next_exec)
-    logger.info(f"✅ Próxima ejecución permitida después de: {next_exec}")
-
-    # Crear túnel SOCKS5 en el host
-    proxy_base_port = 1080
-    proxy_offset = int(host_name[-1]) if host_name[-1].isdigit() else 0
-    proxy_port = proxy_base_port + proxy_offset
+    container_name = f"l-bot-{host_name}"
 
     if not host_name.startswith("s0"):
-        logger.info(f"❌ Killing SOCKS proxy for {host_name} on port {proxy_port}...")
-        kill_process_on_port(proxy_port)
-        subprocess.run(f"pkill -f 'ssh.*-D {proxy_port}'", shell=True)
-    else:
-        logger.info(f"❌ Skipping SOCKS kill proxy for {host_name}.")
-        
-    socks_command = [
-        "ssh", "-vvv", "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
-        "-D", str(proxy_port), host_name, "-N", "-f"
-    ]
-    
-    if host_name.startswith("s0"):
-        logger.info(f"❌ Skipping SOCKS proxy for {host_name} (starts with 's0').")
-    else:
+        sshuttle_cmd = [
+            "docker", "exec", "-u", "root", container_name,
+            "bash", "-c",
+            f"sshuttle --ssh-cmd 'ssh -J yo0' -r {host_name} 0.0.0.0/0 --daemon --pidfile /tmp/sshuttle_{host_name}.pid"
+        ]
+        logger.info(f"🛠️ [COMMAND] {' '.join(sshuttle_cmd)}")
         try:
-            logger.info(f"[COMMAND] {' '.join(socks_command)}")
-            subprocess.run(socks_command, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, check=True)
-            logger.info(f"✅ SOCKS proxy launched on port {proxy_port}")
+            result = subprocess.run(sshuttle_cmd, capture_output=True, text=True)
+            logger.info(f"ℹ️ [sshuttle stdout]\n{result.stdout}")
+            logger.info(f"ℹ️ [sshuttle stderr]\n{result.stderr}")
+            logger.info(f"✅ sshuttle launched in background for {host_name}")
         except Exception as e:
-            logger.error(f"❌ Error launching SOCKS proxy: {e}")
+            logger.error(f"❌ Error launching sshuttle on host: {e}")
             raise
+
+        time.sleep(10)  # Esperar a que sshuttle esté listo
+    result = subprocess.run(
+        ["curl","-4", "-s", "ifconfig.me"],
+        capture_output=True, text=True, check=True
+    )
+    current_ip = result.stdout.strip()
+    logger.info(f"🌐 IP pública desde fuera del contenedor {container_name}: {current_ip}")
+
+
+    puerto_vnc = int(host_name[-1]) 
+
+    ssh_cmd = [
+    "docker", "exec", "-u", "root", container_name,
+    "bash", "-c",
+    f"ssh -N -f -R {5909 + 10 + puerto_vnc}:localhost:5900 yo0"    ]
+    logger.info(f"🛠️ [COMMAND] {' '.join(ssh_cmd)}")
+    try:
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True)
+        logger.info(f"ℹ️ [ssh stdout]\n{result.stdout}")
+        logger.info(f"ℹ️ [ssh stderr]\n{result.stderr}")
+        logger.info(f"✅ Ssh launched in port {5909 + 10 + puerto_vnc} for {host_name}")
+    except Exception as e:
+        logger.error(f"❌ Error launching ssh on port {5909 +10+ puerto_vnc} on host: {e}")
+        raise
+
+
+
+    try:
+        container_name = f"l-bot-{host_name}"
+        result = subprocess.run(
+            ["docker", "exec", container_name, "curl", "-s", "ifconfig.me"],
+            capture_output=True, text=True, check=True
+        )
+        current_ip = result.stdout.strip()
+        logger.info(f"🌐🌐🌐 IP pública desde contenedor {container_name}: {current_ip}")
+    except Exception as e:
+        logger.error(f"❌ Error obteniendo IP pública desde contenedor: {e}")
+        raise
+
+    ip_map_raw = Variable.get("ips_autorizadas_bot", default_var="", deserialize_json=False)
+    ip_map = dict(line.strip().split("=") for line in ip_map_raw.strip().splitlines() if "=" in line)
+
+    expected_host = "s0" if host_name.startswith("s0") else host_name
+    ip_ok = any(ip == current_ip and nombre == expected_host for ip, nombre in ip_map.items())
+
+
+    expected_ip = next((ip for ip, nombre in ip_map.items() if nombre == expected_host), "desconocida")
+    if not ip_ok:
+        logger.warning(f"⚠️ La IP actual ({current_ip}) no coincide con la esperada para {host_name} (la esperada es {expected_ip}). Abortando ejecución.")
+        #time.sleep(200)
+        return
+
+
 
     tiempo_minimo=MIN
     tiempo_maximo=MAX
@@ -308,16 +467,17 @@ def run_bot_ssh(host_name, **context):
         "python3", "main.py",
         "--config", f"json/conf-{host_name}.json",
         "--responses", f"json/resp-s0.json" if host_name.startswith("s0") else f"json/resp-{host_name}.json",
+        "--IP", f"{expected_ip}",
         str(tiempo_minimo), str(tiempo_maximo)
     ]
 
-    logger.info(f"[COMMAND] {' '.join(main_command)}")
+    logger.info(f"🛠️ [COMMAND] {' '.join(main_command)}")
 
     process = subprocess.Popen(main_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
     for line in iter(process.stdout.readline, ''):
         if line:
-            logger.info(line.strip())
+            logger.info(f"ℹ️ {line.strip()}")
 
     process.stdout.close()
     returncode = process.wait()
@@ -326,26 +486,58 @@ def run_bot_ssh(host_name, **context):
 
     logger.info("✅ Bot script completed successfully.")
 
+
+
+    # Detener sshuttle dentro del contenedor
+    stop_sshuttle_cmd = [
+        "docker", "exec", "-u", "seluser", container_name,
+        "bash", "-c", "kill $(cat /tmp/sshuttle_s1.pid) && rm /tmp/sshuttle_s1.pid"
+    ]
+
+    logger.info(f"🛠️ [COMMAND] {' '.join(stop_sshuttle_cmd)}")
+    try:
+        subprocess.run(stop_sshuttle_cmd, check=True)
+        logger.info("🧹 sshuttle daemon stopped in container.")
+    except Exception as e:
+        logger.warning(f"⚠️ No se pudo detener sshuttle en contenedor: {e}")
+
+
+
+
+
+
 def stop_bot_ssh(host_name):
     """
     Stops the Docker container l-bot.
     Logs both stdout and stderr output.
     """
     logger = LoggingMixin().log
-    logger.info(f"🚀 Running stop command: docker stop l-bot-{host_name}")
-    logger.info(f"[COMMAND] docker stop l-bot-{host_name}")
+    logger.info(f"🛠️ Running stop command: docker stop l-bot-{host_name}")
+    logger.info(f"🛠️ [COMMAND] docker stop l-bot-{host_name}")
     result = subprocess.run(["docker", "stop", f"l-bot-{host_name}"], capture_output=True, text=True)    
-    logger.info(f"[docker stop l-bot] STDOUT:\n{result.stdout}")
-    logger.info(f"[docker stop l-bot] STDERR:\n{result.stderr}")
+    logger.info(f"ℹ️ [docker stop l-bot] STDOUT:\n{result.stdout}")
+    logger.info(f"ℹ️ [docker stop l-bot] STDERR:\n{result.stderr}")
     result.check_returncode()
+
+
+def remove_docker_network(host, **kwargs):
+    logger = LoggingMixin().log
+    network_name = f"net_{host}"
+    logger.info(f"🧹 Intentando eliminar red Docker personalizada: {network_name}")
+    result = subprocess.run(["docker", "network", "rm", network_name], capture_output=True, text=True)
+    if result.returncode == 0:
+        logger.info(f"✅ Red eliminada correctamente: {network_name}")
+    else:
+        logger.warning(f"⚠️ No se pudo eliminar la red {network_name} (puede que ya no exista).")
+        logger.warning(f"STDERR: {result.stderr.strip()}")
 
 
 
 def run_and_stream_ssh(cmd, logger):
-    logger.info(f"🚀 Running command: {cmd}")
+    logger.info(f"🛠️ Running command: {cmd}")
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, shell=isinstance(cmd, str))
     for line in iter(process.stdout.readline, ''):
-        logger.info(line.strip())
+        logger.info(f"ℹ️ {line.strip()}")
     process.stdout.close()
     returncode = process.wait()
     if returncode != 0:
@@ -366,9 +558,9 @@ for host in HOSTS:
     with DAG(
         dag_id=dag_id,
         default_args=default_args,
-        schedule_interval="@hourly",
+        #schedule_interval="@hourly",
         #schedule_interval="@daily",
-        #schedule_interval="*/30 * * * *",
+        schedule_interval="* */3 * * *",
         tags=["bot", "docker"],
         doc_md=f"""
         ## 📄 DAG Documentation: {dag_id}
@@ -396,6 +588,15 @@ for host in HOSTS:
             python_callable=should_run,
             retries=2,
             retry_delay=timedelta(seconds=10)
+        )
+
+        # Insert PythonSensor to wait for no recent builds
+        wait_for_idle_build = PythonSensor(
+            task_id="wait_for_idle_build",
+            python_callable=no_recent_builds,
+            poke_interval=120,
+            timeout=5400,
+            mode="poke"
         )
 
         docker_build_image = PythonOperator(
@@ -431,7 +632,23 @@ for host in HOSTS:
             trigger_rule="all_done",
             retry_delay=timedelta(seconds=10)
         )
-        if host not in ["s0-1", "s0-2"]:
+
+        call_llm_task = PythonOperator(
+            task_id=f"{host}_call_llm_t",
+            python_callable=call_gemini_llm,
+            retries=1,
+            op_kwargs={"host": host},
+            trigger_rule="all_done"
+        )
+        # Add schedule_reboot_task before call_llm_task
+        schedule_reboot_task = PythonOperator(
+            task_id=f"{host}_schedule_reboot_t",
+            python_callable=schedule_reboot,
+            op_kwargs={"host_name": host},
+            retries=1,
+            trigger_rule="all_done"
+        )
+        if not host.startswith("s0"):
             docker_prune_and_log_freed_space = BashOperator(
                 task_id=f"{host}_prune_log_t",
                 bash_command=f'''
@@ -447,8 +664,15 @@ for host in HOSTS:
                 retry_delay=timedelta(seconds=10),
                 trigger_rule="all_done"
             )
+            # Nueva tarea para eliminar la red personalizada (solo si host no empieza con s0-)
+            remove_network_task = PythonOperator(
+                task_id=f"{host}_remove_network_t",
+                python_callable=remove_docker_network,
+                op_kwargs={"host": host},
+                trigger_rule="all_done"
+            )
 
-        if host  in ["s0-1", "s0-2"]:
+        if host.startswith("s0"):
 
             s0_prune_log_t = BashOperator(
                 task_id=f"s0_prune_log_t",
@@ -464,8 +688,14 @@ for host in HOSTS:
                 retry_delay=timedelta(seconds=10),
                 trigger_rule="all_done"
             )
+        # Update task sequence to include wait_for_idle_build before docker_build_image
+        if host.startswith("s0"):
+            check_if_should_run >> wait_for_idle_build >> docker_build_image >> run_docker_task >> run_bot_task >> docker_down >> s0_prune_log_t >> schedule_reboot_task >> call_llm_task
 
-        check_if_should_run >> docker_build_image >> run_docker_task >> run_bot_task >> docker_down
+        if not host.startswith("s0"):
+            check_if_should_run >> wait_for_idle_build >> docker_build_image >> run_docker_task >> run_bot_task >> docker_down >> remove_network_task >> docker_prune_and_log_freed_space >> schedule_reboot_task >> call_llm_task
+
+
 
 # Expose all generated DAGs to Airflow
 globals().update(dags)

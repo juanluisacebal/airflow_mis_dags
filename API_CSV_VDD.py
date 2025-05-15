@@ -24,17 +24,6 @@ catchup = default_args.pop("catchup")
 
 
 ARTISTAS = [
-    "Shakira", "Rosalía", "Luis Fonsi", "Enrique Iglesias", "Ricky Martin",
-    "Alejandro Sanz", "Maluma", "Carlos Vives", "Juanes", "Pablo Alborán",
-    "Marc Anthony", "J Balvin", "Daddy Yankee", "Bad Bunny", "Karol G",
-    "Anitta", "Nicky Jam", "Thalía", "Gloria Trevi", "Reik",
-    "Sebastián Yatra", "Camila Cabello", "Becky G", "Ozuna", "C. Tangana",
-    "Rauw Alejandro", "Myke Towers", "CNCO", "Wisin", "Yandel",
-    "Jennifer Lopez", "Natalia Lafourcade", "Lali", "TINI", "Maná",
-    "Romeo Santos", "Prince Royce", "La India", "Pedro Capó", "Gente de Zona"
-]
-
-ARTISTAS = [
     "Shakira" ,"Beyoncé", "Wyclef Jean"
     ,"Alejandro Sanz", "JAY‐Z", "Lady Gaga",
     "Juanes", "David Guetta"
@@ -158,7 +147,7 @@ def extract_musicbrainz_data():
         artist_info_list[-1]["isnis"] = artist_data.get("isnis", [])
         artist_info_list[-1]["relations"] = artist_data.get("relations", [])
 
-        # Collect tags
+        # tags
         for tag in artist_data.get("tags", []):
             tags_list.append({
                 "mbid": artist_data.get("id"),
@@ -295,7 +284,7 @@ def top10_nodos():
     )
 
     top = top.merge(df2[['mbid', 'name']], left_on='source', right_on='mbid', how='left')
-    top = top[['source', 'name', 'count']]  # Reordenamos columnas si querés
+    top = top[['source', 'name', 'count']] 
 
     salida = os.path.join(OUTPUT_DIR, 'top10_nodos.csv')
     top.to_csv(salida, index=False)
@@ -303,7 +292,8 @@ def top10_nodos():
     print("Top 10 Nodos:")
     print(top.to_string(index=False))
 
-
+def nada():
+    print
 
 with DAG(
     dag_id="API_CSV_VDD_PEC4_musicbrainz_artist_collaborations",
@@ -311,13 +301,14 @@ with DAG(
     catchup = catchup,
     #schedule_interval=default_args["schedule_interval"],
     #schedule_interval="*/5 * * * *"
-    schedule_interval="@daily"
+    schedule_interval="@hourly"
 
 
 ) as dag:
-    cleanup_musicbrainz = BashOperator(
-        task_id='cleanup_musicbrainz_data',
-        bash_command='rm -rf /tmp/musicbrainz_data/*'
+    cleanup_musicbrainz = PythonOperator(
+        task_id='clean_musicbrainz_data',
+        python_callable=nada,
+        #bash_command='rm -rf /tmp/musicbrainz_data/*'
     )
 
     extract_data = PythonOperator(
