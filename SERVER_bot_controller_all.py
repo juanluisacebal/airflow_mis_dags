@@ -54,8 +54,8 @@ HOSTS = Variable.get("hosts_bot", default_var="s1", deserialize_json=False).spli
 #HOSTS=['s1','s2','s3']
 #HOSTS=['s0-1','s0-2']
 
-MINUTES_MIN = 260
-MINUTES_MAX = 300
+MINUTES_MIN = 110
+MINUTES_MAX = 120
 
 MIN = MINUTES_MIN / 60
 MAX = MINUTES_MAX / 60
@@ -321,14 +321,25 @@ def run_docker(host_name, **context):
         #    port_offset=0
         puertos_en_uso = ["-p", ports[0], "-p", ports[1], "-p", ports[2]]
         extra_caps = ["-d"]
+        variables_en_uso = [
+            "-e", f"SE_VNC_PORT=5900"
+            #"-e", f"SE_VNC_NO_PASSWORD=1"
+        ]
     if not host_name.startswith("s0"):
         ports = [
             f"{4454 + port_offset}:4444",
-            f"{5909 + port_offset}:5900",
-            f"{7909 + port_offset}:7900"
+            f"{5909 + 10+ port_offset}:5900",
+            f"{7909 +10+  port_offset}:7900"
         ]
         extra_caps = ["-d", "--cap-add=NET_ADMIN", "--add-host", "host.docker.internal:host-gateway"]
         puertos_en_uso = ["-p", ports[1]]
+        variables_en_uso = [
+            #"-e", f"SE_VNC_NO_PASSWORD=1",
+            "-e", f"SE_VNC_PORT={5909 +10+ port_offset}",
+            #"-e", f"SE_VNC_PORT={4454 +10+ port_offset}",
+            "-e", f"SE_NO_VNC_PORT={7909 +10+ port_offset}"
+
+        ]
 
 
     host_index = HOSTS.index(host_name)
@@ -336,7 +347,7 @@ def run_docker(host_name, **context):
     cpu_secondary = 7 - host_index
     cpu_limit = [#"--cpuset-cpus",
                  #f"{cpu_primary},{cpu_secondary}",
-                 "--cpus=5"
+                 "--cpus=8"
                  ]
     # run_command (ajustar network según host_name)
     run_command = [
@@ -345,11 +356,13 @@ def run_docker(host_name, **context):
         # "-d",
         *extra_caps,
         *cpu_limit, 
+        *variables_en_uso,
         "--name", f"l-bot-{host_name}",
         "--network", custom_network if not host_name.startswith("s0-") else "bridge",
         "--hostname", f"d-{host_name}" if not host_name.startswith("s0-") else host_name,
         *puertos_en_uso,
-        "--tmpfs", "/tmp:rw,size=512m",
+        "--ulimit", "nofile=32768",
+        #"--tmpfs", "/tmp:rw,size=1024m",
         "--shm-size", "2g",
         "-v", f"{bot_path}:/home/seluser/compartido",
         "l-bot-custom"
@@ -420,15 +433,15 @@ def run_bot_ssh(host_name, **context):
     "docker", "exec", "-u", "root", container_name,
     "bash", "-c",
     f"ssh -N -f -R {5909 + 10 + puerto_vnc}:localhost:5900 yo0"    ]
-    logger.info(f"🛠️ [COMMAND] {' '.join(ssh_cmd)}")
-    try:
-        result = subprocess.run(ssh_cmd, capture_output=True, text=True)
-        logger.info(f"ℹ️ [ssh stdout]\n{result.stdout}")
-        logger.info(f"ℹ️ [ssh stderr]\n{result.stderr}")
-        logger.info(f"✅ Ssh launched in port {5909 + 10 + puerto_vnc} for {host_name}")
-    except Exception as e:
-        logger.error(f"❌ Error launching ssh on port {5909 +10+ puerto_vnc} on host: {e}")
-        raise
+    #logger.info(f"🛠️ [COMMAND] {' '.join(ssh_cmd)}")
+    #try:
+        #result = subprocess.run(ssh_cmd, capture_output=True, text=True)
+        #logger.info(f"ℹ️ [ssh stdout]\n{result.stdout}")
+        #logger.info(f"ℹ️ [ssh stderr]\n{result.stderr}")
+        #logger.info(f"✅ Ssh launched in port {5909 + 10 + puerto_vnc} for {host_name}")
+    #except Exception as e:
+        #logger.error(f"❌ Error launching ssh on port {5909 +10+ puerto_vnc} on host: {e}")
+        #raise
 
 
 
@@ -553,14 +566,29 @@ def nada():
 dags = {}
 
 for host in HOSTS:
-    dag_id = f"SERVER_bot_controller_{host}"
+    if host=='s0-1':
+        subfix='_es'
+    elif host=='s0-2':
+        subfix='_co'
+    elif host=='s0-3':
+        subfix='_me'
+    elif host=='s0-4':
+        subfix='_la'
+    elif host=='s1':
+        subfix='_vi'
+    elif host=='s3':
+        subfix='_ja'
+    else:
+        subfix=''
+
+    dag_id = f"SERVER_bot_controller_{host}{subfix}"
 
     with DAG(
         dag_id=dag_id,
         default_args=default_args,
         #schedule_interval="@hourly",
         #schedule_interval="@daily",
-        schedule_interval="* */3 * * *",
+        schedule_interval="* */4 * * *",
         tags=["bot", "docker"],
         doc_md=f"""
         ## 📄 DAG Documentation: {dag_id}
