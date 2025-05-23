@@ -117,7 +117,7 @@ with DAG(
     dag_id='SERVER_GIT_backup',
     default_args=default_args,
     #schedule_interval=default_args["schedule_interval"],
-    schedule_interval="0,10,20,30 7 * * 1-5",
+    schedule_interval="0,10,20,30,40 7 * * 1-6",
     tags=['GIT', 'BACKUP']
 ) as dag_SERV_GIT_BACKUP:
     backup_git_task = PythonOperator(

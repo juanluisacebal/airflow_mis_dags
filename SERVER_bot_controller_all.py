@@ -54,8 +54,8 @@ HOSTS = Variable.get("hosts_bot", default_var="s1", deserialize_json=False).spli
 #HOSTS=['s1','s2','s3']
 #HOSTS=['s0-1','s0-2']
 
-MINUTES_MIN = 110
-MINUTES_MAX = 120
+MINUTES_MIN = 100
+MINUTES_MAX = 110
 
 MIN = MINUTES_MIN / 60
 MAX = MINUTES_MAX / 60
@@ -328,7 +328,7 @@ def run_docker(host_name, **context):
     if not host_name.startswith("s0"):
         ports = [
             f"{4454 + port_offset}:4444",
-            f"{5909 + 10+ port_offset}:5900",
+            f"{5909 + 10+ port_offset}:5909 +10+ port_offset",
             f"{7909 +10+  port_offset}:7900"
         ]
         extra_caps = ["-d", "--cap-add=NET_ADMIN", "--add-host", "host.docker.internal:host-gateway"]
@@ -432,16 +432,16 @@ def run_bot_ssh(host_name, **context):
     ssh_cmd = [
     "docker", "exec", "-u", "root", container_name,
     "bash", "-c",
-    f"ssh -N -f -R {5909 + 10 + puerto_vnc}:localhost:5900 yo0"    ]
-    #logger.info(f"🛠️ [COMMAND] {' '.join(ssh_cmd)}")
-    #try:
-        #result = subprocess.run(ssh_cmd, capture_output=True, text=True)
-        #logger.info(f"ℹ️ [ssh stdout]\n{result.stdout}")
-        #logger.info(f"ℹ️ [ssh stderr]\n{result.stderr}")
-        #logger.info(f"✅ Ssh launched in port {5909 + 10 + puerto_vnc} for {host_name}")
-    #except Exception as e:
-        #logger.error(f"❌ Error launching ssh on port {5909 +10+ puerto_vnc} on host: {e}")
-        #raise
+    f"ssh -N -f -R {5909 + 10 + puerto_vnc}:localhost:{5909 + 10 + puerto_vnc} yo0"    ]
+    logger.info(f"🛠️ [COMMAND] {' '.join(ssh_cmd)}")
+    try:
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True)
+        logger.info(f"ℹ️ [ssh stdout]\n{result.stdout}")
+        logger.info(f"ℹ️ [ssh stderr]\n{result.stderr}")
+        logger.info(f"✅ Ssh launched in port {5909 + 10 + puerto_vnc} for {host_name}")
+    except Exception as e:
+        logger.error(f"❌ Error launching ssh on port {5909 +10+ puerto_vnc} on host: {e}")
+        raise
 
 
 
