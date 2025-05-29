@@ -74,8 +74,8 @@ def backup_git_repos(**kwargs):
             if result.stderr:
                 print(f"⚠️ Errors from git add in {repo_path}:\n{result.stderr}")
 
-            fecha_commit = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            result = subprocess.run(["git", "commit", "-m", f"Backup automático: {fecha_commit}"], capture_output=True, text=True, check=True, cwd=repo_path)
+            fecha_commit = datetime.now().strftime("%d-%m-%y")
+            result = subprocess.run(["git", "commit", "-m", f"Commit {fecha_commit}"], capture_output=True, text=True, check=True, cwd=repo_path)
             print(f"📝 Output from git commit in {repo_path}:\n{result.stdout}")
             if result.stderr:
                 print(f"⚠️ Errors from git commit in {repo_path}:\n{result.stderr}")
@@ -117,7 +117,7 @@ with DAG(
     dag_id='SERVER_GIT_backup',
     default_args=default_args,
     #schedule_interval=default_args["schedule_interval"],
-    schedule_interval="0,10,20,30,40 7 * * 1-6",
+    schedule_interval="0,10 7 * * 1-5",
     tags=['GIT', 'BACKUP']
 ) as dag_SERV_GIT_BACKUP:
     backup_git_task = PythonOperator(

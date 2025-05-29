@@ -54,11 +54,11 @@ HOSTS = Variable.get("hosts_bot", default_var="s1", deserialize_json=False).spli
 #HOSTS=['s1','s2','s3']
 #HOSTS=['s0-1','s0-2']
 
-MINUTES_MIN = 100
-MINUTES_MAX = 110
+MIN_MIN = 90
+MIN_MAX = 100
 
-MIN = MINUTES_MIN / 60
-MAX = MINUTES_MAX / 60
+MIN = MIN_MIN / 60
+MAX = MIN_MAX / 60
 
 
 bot_path = Variable.get("ruta_bots")
@@ -328,7 +328,7 @@ def run_docker(host_name, **context):
     if not host_name.startswith("s0"):
         ports = [
             f"{4454 + port_offset}:4444",
-            f"{5909 + 10+ port_offset}:5909 +10+ port_offset",
+            f"{5909 + 10+ port_offset}:{5909 +10+ port_offset}",
             f"{7909 +10+  port_offset}:7900"
         ]
         extra_caps = ["-d", "--cap-add=NET_ADMIN", "--add-host", "host.docker.internal:host-gateway"]
@@ -495,7 +495,8 @@ def run_bot_ssh(host_name, **context):
     process.stdout.close()
     returncode = process.wait()
     if returncode != 0:
-        raise subprocess.CalledProcessError(returncode, main_command)
+        logger.warning(f"⚠️ El script terminó con código {returncode}, no se interrumpe el DAG.")
+        return
 
     logger.info("✅ Bot script completed successfully.")
 
@@ -507,12 +508,12 @@ def run_bot_ssh(host_name, **context):
         "bash", "-c", "kill $(cat /tmp/sshuttle_s1.pid) && rm /tmp/sshuttle_s1.pid"
     ]
 
-    logger.info(f"🛠️ [COMMAND] {' '.join(stop_sshuttle_cmd)}")
-    try:
-        subprocess.run(stop_sshuttle_cmd, check=True)
-        logger.info("🧹 sshuttle daemon stopped in container.")
-    except Exception as e:
-        logger.warning(f"⚠️ No se pudo detener sshuttle en contenedor: {e}")
+    #logger.info(f"🛠️ [COMMAND] {' '.join(stop_sshuttle_cmd)}")
+    #try:
+    #    subprocess.run(stop_sshuttle_cmd, check=True)
+    #    logger.info("🧹 sshuttle daemon stopped in container.")
+    #except Exception as e:
+    #    logger.warning(f"⚠️ No se pudo detener sshuttle en contenedor: {e}")
 
 
 
@@ -614,7 +615,7 @@ for host in HOSTS:
         check_if_should_run = ShortCircuitOperator(
             task_id="check_should_run",
             python_callable=should_run,
-            retries=2,
+            retries=1,
             retry_delay=timedelta(seconds=10)
         )
 
@@ -630,41 +631,41 @@ for host in HOSTS:
         docker_build_image = PythonOperator(
             task_id="s0_docker_build_t",
             python_callable=build_docker_image,
-            retries=2,
-            retry_delay=timedelta(seconds=10)
+            #retries=1,
+            #retry_delay=timedelta(seconds=10)
         )
 
         run_docker_task = PythonOperator(
             task_id=f"{host}_run_docker_t",
             python_callable=run_docker,
             op_kwargs={"host_name": host},
-            retries=2,
+            retries=0,
             trigger_rule="all_done",
-            retry_delay=timedelta(seconds=15)
+            #retry_delay=timedelta(seconds=15)
         )
 
         run_bot_task = PythonOperator(
             task_id=f"{host}_run_bot_t",
             python_callable=run_bot_ssh,
             op_kwargs={"host_name": host},
-            retries=2,
+            #retries=0,
             trigger_rule="all_done",
-            retry_delay=timedelta(seconds=15)
+            #retry_delay=timedelta(seconds=15)
         )
 
         docker_down = PythonOperator(
             task_id=f"{host}_docker_down_t",
             python_callable=stop_bot_ssh,
             op_kwargs={"host_name": host},
-            retries=1,
+            #retries=1,
             trigger_rule="all_done",
-            retry_delay=timedelta(seconds=10)
+            #retry_delay=timedelta(seconds=10)
         )
 
         call_llm_task = PythonOperator(
             task_id=f"{host}_call_llm_t",
             python_callable=call_gemini_llm,
-            retries=1,
+            #retries=1,
             op_kwargs={"host": host},
             trigger_rule="all_done"
         )
@@ -673,7 +674,7 @@ for host in HOSTS:
             task_id=f"{host}_schedule_reboot_t",
             python_callable=schedule_reboot,
             op_kwargs={"host_name": host},
-            retries=1,
+            #retries=1,
             trigger_rule="all_done"
         )
         if not host.startswith("s0"):
@@ -688,8 +689,8 @@ for host in HOSTS:
                 AFTER=$(ssh {host} "docker system df -v" | tee /tmp/docker_after.txt | grep "Total space used" | awk '{{print $4, $5}}')
                 echo "🧹 Freed space: $BEFORE -> $AFTER"
                 ''',
-                retries=2,
-                retry_delay=timedelta(seconds=10),
+                #retries=1,
+                #retry_delay=timedelta(seconds=10),
                 trigger_rule="all_done"
             )
             # Nueva tarea para eliminar la red personalizada (solo si host no empieza con s0-)
@@ -712,8 +713,8 @@ for host in HOSTS:
                 AFTER=$("docker system df -v" | tee /tmp/docker_after.txt | grep "Total space used" | awk '{{print $4, $5}}')
                 echo "🧹 Freed space: $BEFORE -> $AFTER"
                 ''',
-                retries=2,
-                retry_delay=timedelta(seconds=10),
+                #retries=1,
+                #retry_delay=timedelta(seconds=10),
                 trigger_rule="all_done"
             )
         # Update task sequence to include wait_for_idle_build before docker_build_image
