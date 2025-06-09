@@ -429,19 +429,21 @@ def run_bot_ssh(host_name, **context):
 
     puerto_vnc = int(host_name[-1]) 
 
-    ssh_cmd = [
-    "docker", "exec", "-u", "root", container_name,
-    "bash", "-c",
-    f"ssh -N -f -R {5909 + 10 + puerto_vnc}:localhost:{5909 + 10 + puerto_vnc} yo0"    ]
-    logger.info(f"🛠️ [COMMAND] {' '.join(ssh_cmd)}")
-    try:
-        result = subprocess.run(ssh_cmd, capture_output=True, text=True)
-        logger.info(f"ℹ️ [ssh stdout]\n{result.stdout}")
-        logger.info(f"ℹ️ [ssh stderr]\n{result.stderr}")
-        logger.info(f"✅ Ssh launched in port {5909 + 10 + puerto_vnc} for {host_name}")
-    except Exception as e:
-        logger.error(f"❌ Error launching ssh on port {5909 +10+ puerto_vnc} on host: {e}")
-        raise
+    if not host_name.startswith("s0"):
+
+        ssh_cmd = [
+        "docker", "exec", "-u", "root", container_name,
+        "bash", "-c",
+        f"ssh -N -f -R {5909 + 10 + puerto_vnc}:localhost:{5909 + 10 + puerto_vnc} yo0"    ]
+        logger.info(f"🛠️ [COMMAND] {' '.join(ssh_cmd)}")
+        try:
+            result = subprocess.run(ssh_cmd, capture_output=True, text=True)
+            logger.info(f"ℹ️ [ssh stdout]\n{result.stdout}")
+            logger.info(f"ℹ️ [ssh stderr]\n{result.stderr}")
+            logger.info(f"✅ Ssh launched in port {5909 + 10 + puerto_vnc} for {host_name}")
+        except Exception as e:
+            logger.error(f"❌ Error launching ssh on port {5909 +10+ puerto_vnc} on host: {e}")
+            raise
 
 
 
@@ -500,20 +502,19 @@ def run_bot_ssh(host_name, **context):
 
     logger.info("✅ Bot script completed successfully.")
 
+    if not host_name.startswith("s0"):
+        # Detener sshuttle dentro del contenedor
+        stop_sshuttle_cmd = [
+            "docker", "exec", "-u", "seluser", container_name,
+            "bash", "-c", f"kill $(cat /tmp/sshuttle_{host_name}.pid) && rm /tmp/sshuttle_{host_name}.pid"
+        ]
 
-
-    # Detener sshuttle dentro del contenedor
-    stop_sshuttle_cmd = [
-        "docker", "exec", "-u", "seluser", container_name,
-        "bash", "-c", "kill $(cat /tmp/sshuttle_s1.pid) && rm /tmp/sshuttle_s1.pid"
-    ]
-
-    #logger.info(f"🛠️ [COMMAND] {' '.join(stop_sshuttle_cmd)}")
-    #try:
-    #    subprocess.run(stop_sshuttle_cmd, check=True)
-    #    logger.info("🧹 sshuttle daemon stopped in container.")
-    #except Exception as e:
-    #    logger.warning(f"⚠️ No se pudo detener sshuttle en contenedor: {e}")
+        logger.info(f"🛠️ [COMMAND] {' '.join(stop_sshuttle_cmd)}")
+        try:
+            subprocess.run(stop_sshuttle_cmd, check=True)
+            logger.info("🧹 sshuttle daemon stopped in container.")
+        except Exception as e:
+            logger.warning(f"⚠️ No se pudo detener sshuttle en contenedor: {e}")
 
 
 
@@ -658,7 +659,7 @@ for host in HOSTS:
             python_callable=stop_bot_ssh,
             op_kwargs={"host_name": host},
             #retries=1,
-            trigger_rule="all_done",
+            #trigger_rule="all_done",
             #retry_delay=timedelta(seconds=10)
         )
 
