@@ -29,13 +29,17 @@ def start_streamlit_if_needed_factory(app_file, app_path, port, log_path):
             with open(log_path, "a") as f:
                 f.write(f"✅ Streamlit {app_file} ya está corriendo en el puerto {port}\n")
             return
-        subprocess.Popen([
+
+        command = [
             "/opt/streamlit_venv/bin/streamlit", "run", app_path,
             "--server.port", str(port),
             "--server.headless", "true"
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ]
+        subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logging.info(f"Starting Streamlit {command}")
         with open(log_path, "a") as f:
             f.write(f"🚀 Streamlit {app_file} se lanzó automáticamente en el puerto {port}\n")
+        logging.info(f"Streamlit {app_file} launched on port {port}")
     return start_streamlit_if_needed
 
 def get_app_number(filename):
