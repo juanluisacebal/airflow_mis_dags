@@ -61,10 +61,10 @@ def load_all_tickers(**kwargs):
     cursor = connection.cursor()
     
     try:
-        # Crear schema stage si no existe
+        # Create 'stage' schema if it doesn't exist
         cursor.execute("CREATE SCHEMA IF NOT EXISTS stage")
         connection.commit()
-        logging.info("✅ Schema 'stage' verificado/creado")
+        logging.info("✅ Schema 'stage' verified/created")
         
         for ticker in tickers:
             logging.info(f"🔄 Loading {ticker}")
@@ -78,20 +78,20 @@ def load_all_tickers(**kwargs):
             df = pd.read_csv(csv_path)
             logging.info(f"🔄 DataFrame shape: {df.shape}")
             
-            # Limpiar nombres de columnas
+            # Clean column names
             df.columns = [col.replace("('", "").replace("')", "").replace(", '", "_").replace("'", "").lower() for col in df.columns]
             
-            # Detectar columnas automáticamente
+            # Automatically detect columns
             date_col = next((col for col in df.columns if col in ['index', 'date']), None)
             if date_col:
                 df[date_col] = pd.to_datetime(df[date_col])
             
-            # Detectar y convertir columnas numéricas individualmente
+            # Detect and convert numeric columns individually
             for col in df.columns:
                 if any(pattern in col for pattern in ['close', 'high', 'low', 'open']):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
             
-            # Detectar y convertir columna de volumen
+            # Detect and convert volume column
             volume_col = next((col for col in df.columns if 'volume' in col), None)
             if volume_col:
                 df[volume_col] = pd.to_numeric(df[volume_col], errors='coerce').fillna(0).astype('int64')
@@ -100,7 +100,7 @@ def load_all_tickers(**kwargs):
             try:
                 logging.info(f"🚀 Uploading {ticker} to PostgreSQL")
                 
-                # Crear definición de columnas dinámicamente
+                # Dynamically create column definitions
                 columns_def = []
                 for col in df.columns:
                     if col == date_col:
@@ -112,17 +112,17 @@ def load_all_tickers(**kwargs):
                     else:
                         columns_def.append(f"{col} DOUBLE PRECISION")
                 
-                # Drop y Create de la tabla staging
+                # Drop and create the staging table
                 cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
                 create_stmt = f"CREATE TABLE {table_name} ({', '.join(columns_def)})"
                 cursor.execute(create_stmt)
                 connection.commit()
                 
-                # Preparar datos para inserción
+                # Prepare data for insertion
                 df_cleaned = df.where(pd.notnull(df), None)
                 records = [tuple(row) for row in df_cleaned.itertuples(index=False, name=None)]
                 
-                # Insertar datos en batches
+                # Insert data in batches
                 batch_size = 500
                 placeholders = ','.join(['%s' for _ in df.columns])
                 insert_stmt = f"INSERT INTO {table_name} ({', '.join(df.columns)}) VALUES ({placeholders})"
@@ -140,7 +140,7 @@ def load_all_tickers(**kwargs):
                 connection.rollback()
                 raise
     except Exception as e:
-        logging.error(f"❌ Error general en load_all_tickers: {e}")
+        logging.error(f"❌ General error in load_all_tickers: {e}")
         connection.rollback()
         raise
     finally:
@@ -149,7 +149,7 @@ def load_all_tickers(**kwargs):
 
 def update_final_table(**kwargs):
     """
-    Asegura que el schema existe y actualiza finance.tickers_historicos con nuevos registros de cada tabla staging
+    Ensures the schema exists and updates finance.tickers_historicos with new records from each staging table
     """
     conn = BaseHook.get_connection("postgres_default")
     connection = psycopg2.connect(
@@ -162,11 +162,11 @@ def update_final_table(**kwargs):
     cursor = connection.cursor()
 
     try:
-        # Crear schema si no existe
+        # Create schema if it doesn't exist
         cursor.execute("CREATE SCHEMA IF NOT EXISTS finance")
         connection.commit()
 
-        # Primero, crear la tabla final si no existe con una estructura fija
+        # First, create the final table if it doesn't exist with a fixed structure
         final_table = "finance.tickers_historicos"
         cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS {final_table} (
@@ -184,7 +184,7 @@ def update_final_table(**kwargs):
         for ticker in tickers:
             staging_table = f"stage.stg_{ticker.lower()}"
             
-            # Verificar si la tabla staging existe
+            # Check if the staging table exists
             cursor.execute("""
                 SELECT EXISTS (
                     SELECT FROM information_schema.tables 
@@ -197,7 +197,7 @@ def update_final_table(**kwargs):
                 logging.warning(f"⚠️ Tabla staging {staging_table} no existe")
                 continue
 
-            # Obtener los nombres de columnas de la tabla staging
+            # Get column names from the staging table
             cursor.execute(f"""
                 SELECT column_name, data_type 
                 FROM information_schema.columns 
@@ -206,7 +206,7 @@ def update_final_table(**kwargs):
             """)
             staging_columns = {row[0]: row[1] for row in cursor.fetchall()}
             
-            # Identificar columnas clave en staging
+            # Identify key columns in staging
             date_col = next((col for col in staging_columns.keys() if col in ['index', 'date']), None)
             close_col = next((col for col in staging_columns.keys() if 'close' in col), None)
             high_col = next((col for col in staging_columns.keys() if 'high' in col), None)
@@ -215,10 +215,10 @@ def update_final_table(**kwargs):
             volume_col = next((col for col in staging_columns.keys() if 'volume' in col), None)
 
             if not all([date_col, close_col, high_col, low_col, open_col, volume_col]):
-                logging.warning(f"⚠️ No se encontraron todas las columnas necesarias en {staging_table}")
+                logging.warning(f"⚠️ Not all required columns found in {staging_table}")
                 continue
 
-            # Obtener fecha máxima para el ticker de la tabla final
+            # Get max date for the ticker from the final table
             cursor.execute("""
                 SELECT COALESCE(MAX(date), '1900-01-01'::timestamp) 
                 FROM finance.tickers_historicos 
@@ -228,7 +228,7 @@ def update_final_table(**kwargs):
 
             logging.info(f"🧮 Max date in final table for {ticker}: {max_date}")
 
-            # Insertar nuevos registros mapeando las columnas correctamente
+            # Insert new records, mapping columns correctly
             insert_sql = f"""
                 INSERT INTO {final_table} (date, close, high, low, open, volume, ticker)
                 SELECT 
@@ -267,10 +267,10 @@ with DAG(
     doc_md="""
 ### DAG: Upload Ticker Historical Data to PostgreSQL
 
-Este DAG extrae datos históricos de Yahoo Finance para los tickers seleccionados,
-y los carga en una tabla staging (`stage.stg_ticker`) en PostgreSQL.
+This DAG extracts historical data from Yahoo Finance for selected tickers,
+and loads them into a staging table (`stage.stg_ticker`) in PostgreSQL.
 
-Todos los tickers son procesados secuencialmente usando tareas consolidadas.
+All tickers are processed sequentially using consolidated tasks.
 """
 ) as dag:
 
@@ -305,8 +305,8 @@ Todos los tickers son procesados secuencialmente usando tareas consolidadas.
         doc_md="""
 #### Task: update_final_table
 
-Esta tarea asegura que exista el schema `finance` y la tabla `tickers_historicos`.
-Fusiona datos de cada tabla staging insertando solo nuevos registros en la tabla final.
+This task ensures that the `finance` schema and `tickers_historicos` table exist.
+It merges data from each staging table, inserting only new records into the final table.
 """
     )
 
@@ -314,8 +314,8 @@ Fusiona datos de cada tabla staging insertando solo nuevos registros en la tabla
 
     def validate_tickers_exist(**kwargs):
         """
-        Valida los tickers verificando su existencia en Yahoo Finance.
-        Elimina cualquier ticker inválido y actualiza la Variable de Airflow.
+        Validates tickers by checking their existence on Yahoo Finance.
+        Removes any invalid tickers and updates the Airflow Variable.
         """
         from yfinance import Ticker
 
@@ -345,8 +345,8 @@ Fusiona datos de cada tabla staging insertando solo nuevos registros en la tabla
         doc_md="""
 #### Task: validate_tickers
 
-Esta tarea verifica si las tablas staging existen para cada ticker.
-Si no, el ticker es eliminado de la variable `tickers` y se anota en la descripción.
+This task checks if the staging tables exist for each ticker.
+If not, the ticker is removed from the `tickers` variable and noted in the description.
 """
     )
 
