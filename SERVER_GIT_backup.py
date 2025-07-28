@@ -15,11 +15,16 @@ default_args["start_date"] = datetime.strptime(default_args["start_date"], "%Y-%
 default_args["retry_delay"] = timedelta(minutes=default_args.pop("retry_delay_minutes"))
 
 def backup_git_repos(**kwargs):
+    print("🔧 Iniciando función backup_git_repos...")
+    print(f"📦 backup_git variable (raw): {Variable.get('backup_git')}")
+    print(f"📂 ruta_files: {ruta_files}")
+    print(f"📌 default_args: {default_args}")
     backup_git = Variable.get("backup_git", deserialize_json=True)
     if not backup_git:
         print("📭 Repository list is empty.")
         return
     current_repo = backup_git.pop(0)
+    print(f"📁 Procesando repositorio actual: {current_repo}")
 
     repo_path = current_repo
     # If the variable points to the *.git* directory, move up to the repo root
@@ -27,15 +32,19 @@ def backup_git_repos(**kwargs):
         repo_path = os.path.dirname(repo_path)
     if not os.path.isdir(repo_path):
         return
+    print(f"📂 Ruta final del repositorio: {repo_path}")
 
     try:
         try:
+            print(f"🔐 Cambiando permisos en: {repo_path}")
             subprocess.run(["chmod", "-R", "g+rX", repo_path], check=True)
         except subprocess.CalledProcessError as e:
             print(f"⚠️ Error changing permissions in {repo_path}: {e}")
 
         precommit_script = os.path.join(repo_path, "precommit.sh")
+        print(f"📜 Ruta del precommit_script: {precommit_script}")
         ruta_backup = Variable.get("RUTA_BACKUP_DATAHUB")
+        print(f"📂 RUTA_BACKUP_DATAHUB: {ruta_backup}")
         if os.path.isfile(precommit_script):
             print(f"🔧 Running precommit.sh in {repo_path}...")
             try:
@@ -59,6 +68,7 @@ def backup_git_repos(**kwargs):
         #if result.stdout.strip() != "":
         #    print(f"✅ No changes to commit in {repo_path}")
         if True:
+            print("📥 Ejecutando git pull...")
             try:
                 result = subprocess.run(["git", "pull"], capture_output=True, text=True, check=True, cwd=repo_path)
                 print(f"📥 Output from git pull in {repo_path}:\n{result.stdout}")
@@ -69,16 +79,19 @@ def backup_git_repos(**kwargs):
                 print(f"📤 STDOUT:\n{e.stdout}")
                 print(f"❌ STDERR:\n{e.stderr}")
 
+            print("➕ Ejecutando git add .")
             result = subprocess.run(["git", "add", "."], capture_output=True, text=True, check=True, cwd=repo_path)
             print(f"📥 Output from git add in {repo_path}:\n{result.stdout}")
             if result.stderr:
                 print(f"⚠️ Errors from git add in {repo_path}:\n{result.stderr}")
 
             fecha_commit = datetime.now().strftime("%d-%m-%y")
+            print(f"📝 Ejecutando git commit con mensaje: Commit {fecha_commit}")
             result = subprocess.run(["git", "commit", "-m", f"Commit {fecha_commit}"], capture_output=True, text=True, check=True, cwd=repo_path)
             print(f"📝 Output from git commit in {repo_path}:\n{result.stdout}")
             if result.stderr:
                 print(f"⚠️ Errors from git commit in {repo_path}:\n{result.stderr}")
+            print("🚀 Ejecutando git push...")
             result = subprocess.run(["git", "push"], capture_output=True, text=True, check=True, cwd=repo_path)
             print(f"🚀 Output from git push in {repo_path}:\n{result.stdout}")
             if result.stderr:
@@ -86,6 +99,7 @@ def backup_git_repos(**kwargs):
     except subprocess.CalledProcessError as e:
         print(f"❗ Error during commit/push in {repo_path}: {e}")
 
+    print(f"🔁 Agregando {current_repo} de nuevo a backup_git.")
     backup_git.append(current_repo)
     Variable.set("backup_git", backup_git, serialize_json=True)
 
