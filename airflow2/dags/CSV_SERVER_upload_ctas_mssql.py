@@ -22,7 +22,7 @@ def load_csv_and_create_table():
     """
     file_path = Variable.get("ruta_files")
     # Get connection from Airflow Connections
-    hook = OdbcHook(odbc_conn_id='mssql', driver='FreeTDS')
+    hook = OdbcHook(odbc_conn_id='mssql', driver='ODBC Driver 18 for SQL Server')
     conn = hook.get_conn()
     cursor = conn.cursor()
 
